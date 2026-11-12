@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sound check</title>
+  <style>
+    body { font: 15px/1.4 system-ui, sans-serif; margin: 16px; background: #14181c; color: #e8e8e8; }
+    #buttons { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+    button { font: inherit; padding: 10px 14px; border-radius: 8px; border: 1px solid #3a4450; background: #222a33; color: inherit; cursor: pointer; }
+    button:active { background: #2f3a46; }
+    #status { font-family: ui-monospace, monospace; }
+  </style>
+</head>
+<body>
+  <h1>Sound check</h1>
+  <div id="status"></div>
+  <label><input type="checkbox" id="mute"> Muted</label>
+  <div id="buttons"></div>
+  <script type="module">
+    import { play, unlock, installAutoUnlock, setMuted, isMuted, isRunning, SOUND_NAMES } from '/js/sound.js';
+
+    const status = document.getElementById('status');
+    const mute = document.getElementById('mute');
+    const buttons = document.getElementById('buttons');
+
+    function render() {
+      status.textContent = `isRunning(): ${isRunning()}  isMuted(): ${isMuted()}`;
+    }
+
+    installAutoUnlock();
+    mute.checked = isMuted();
+    mute.addEventListener('change', () => { setMuted(mute.checked); render(); });
+
+    for (const name of SOUND_NAMES) {
+      const b = document.createElement('button');
+      b.textContent = name;
+      b.addEventListener('click', async () => {
+        await unlock();
+        play(name);
+        render();
+      });
+      buttons.append(b);
+    }
+
+    render();
+    setInterval(render, 500);
+  </script>
+</body>
+</html>

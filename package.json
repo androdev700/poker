@@ -1,0 +1,15 @@
+{
+  "name": "poker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server/index.js",
+    "share": "node server/index.js --tunnel",
+    "test": "node --test test/",
+    "bots": "node scripts/bots.js"
+  },
+  "dependencies": {
+    "three": "0.187.0",
+    "ws": "8.22.2"
+  }
+}

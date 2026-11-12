@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Scene dev harness</title>
+<script type="importmap">
+{ "imports": { "three": "/vendor/three/three.module.js" } }
+</script>
+<style>
+  html, body { margin: 0; height: 100%; background: #07080b; color: #ddd; font: 12px/1.3 system-ui, sans-serif; overflow: hidden; }
+  #wrap { position: fixed; inset: 0; }
+  canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+  #markers { position: absolute; inset: 0; pointer-events: none; }
+  .mk { position: absolute; transform: translate(-50%, -50%); padding: 3px 7px; border-radius: 10px; white-space: nowrap;
+        background: rgba(0,0,0,.6); border: 1px solid rgba(255,255,255,.35); color: #fff; font-weight: 600; }
+  .mk.plate { min-width: 96px; text-align: center; padding: 8px 10px; border-radius: 12px; }
+  .mk.small { padding: 1px 4px; font-size: 10px; background: rgba(40,120,255,.55); border: 0; }
+  #panel { position: fixed; top: 8px; left: 8px; z-index: 2; max-width: min(560px, calc(100vw - 16px)); display: flex; flex-wrap: wrap; gap: 4px;
+           background: rgba(10,12,16,.82); padding: 8px; border-radius: 10px; border: 1px solid #333; }
+  #panel.collapsed > :not(#toggle) { display: none; }
+  #panel button, #panel select { font: inherit; background: #23272f; color: #eee; border: 1px solid #444; border-radius: 6px; padding: 4px 7px; cursor: pointer; }
+  #panel button:hover { background: #313744; }
+  #log { flex-basis: 100%; color: #9fb4d0; min-height: 1.3em; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="c"></canvas>
+  <div id="markers"></div>
+</div>
+<div id="panel">
+  <button id="toggle">☰</button>
+  <label>me <select id="persp"></select></label>
+  <button data-a="syncMid">sync mid-hand</button>
+  <button data-a="syncNull">sync hand:null</button>
+  <button data-a="newHand">new hand (dealHole)</button>
+  <button data-a="flop">flop</button>
+  <button data-a="turn">turn</button>
+  <button data-a="river">river</button>
+  <button data-a="bet">pushBet</button>
+  <button data-a="ret">returnBet</button>
+  <button data-a="collect">collectBets</button>
+  <button data-a="fold">foldHand</button>
+  <button data-a="reveal">revealHand all</button>
+  <button data-a="award">awardPot</button>
+  <button data-a="award2">split pot</button>
+  <button data-a="button">moveButton</button>
+  <button data-a="hl">highlight</button>
+  <button data-a="unhl">clearHighlight</button>
+  <button data-a="syncMidAnim">sync mid-animation</button>
+  <button data-a="demo">full hand</button>
+  <button data-a="markers">markers</button>
+  <div id="log"></div>
+</div>
+<script type="module">
+import { createStage } from './js/scene/stage.js';
+import { makeDeck } from '/shared/cards.js';
+import { eventMs } from '/shared/timing.js';
+
+const canvas = document.getElementById('c');
+const stage = createStage(canvas);
+window.stage = stage;
+const logEl = document.getElementById('log');
+const log = (s) => { logEl.textContent = s; };
+const BB = 20;
+const NAMES = ['You', 'Ava', 'Ben', 'Cleo', 'Dev', 'Eli'];
+
+let me = 0;
+let deck = [];
+let state = null;
+let button = 0;
+
+function shuffle() {
+  deck = makeDeck();
+  for (let i = deck.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [deck[i], deck[j]] = [deck[j], deck[i]];
+  }
+}
+const draw = (n) => deck.splice(0, n);
+
+function baseView() {
+  return {
+    room: { code: 'TEST', status: 'playing', hostId: 'p0', config: { buyIn: 2000, smallBlind: 10, bigBlind: BB, turnSeconds: 30 }, share: { lan: [], tunnel: null } },
+    seats: NAMES.map((name, seat) => ({ seat, name, stack: 2000, busted: false, connected: true, away: false, isHost: seat === 0 })),
+    hand: null,
+    you: { playerId: 'p' + me, seat: me, isHost: me === 0, legal: null },
+  };
+}
+
+function midHand() {
+  shuffle();
+  const v = baseView();
+  const players = {};
+  for (let s = 0; s < 6; s++) {
+    const cards = draw(2);
+    players[s] = { folded: s === 4, allIn: s === 2, streetBet: [0, 60, 0, 60, 0, 25][s], cards: s === me ? cards : null };
+  }
+  v.hand = {
+    handId: Math.floor(Math.random() * 1e6), phase: 'flop', button, sbSeat: (button + 1) % 6, bbSeat: (button + 2) % 6,
+    board: draw(3), pots: [{ amount: 460 }, { amount: 135 }], potTotal: 740, currentBet: 60, toAct: 5, turnId: 3,
+    remainingMs: 20000, turnMs: 30000, players,
+  };
+  return v;
+}
+
+const live = () => Object.keys(state?.hand?.players || {}).map(Number).filter((s) => !state.hand.players[s].folded);
+const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
+
+async function timed(label, budget, p) {
+  const t0 = performance.now();
+  await p;
+  log(`${label}: ${Math.round(performance.now() - t0)} ms` + (budget ? ` (budget ${budget})` : ''));
+}
+
+const actions = {
+  syncMid() { state = midHand(); stage.sync(state); log('sync mid-hand'); },
+  syncNull() { state = baseView(); stage.sync(state); log('sync hand:null'); },
+  async newHand() {
+    shuffle();
+    button = (button + 1) % 6;
+    state = baseView();
+    stage.sync(state);
+    await stage.moveButton(button);
+    const order = [1, 2, 3, 4, 5, 0].map((k) => (button + k) % 6);
+    const mine = draw(2);
+    const players = {};
+    for (const s of order) players[s] = { folded: false, allIn: false, streetBet: 0, cards: s === me ? mine : null };
+    state.hand = { handId: Date.now(), phase: 'preflop', button, sbSeat: order[0], bbSeat: order[1], board: [], pots: [], potTotal: 0,
+                   currentBet: 0, toAct: null, turnId: 0, remainingMs: 0, turnMs: 0, players };
+    const sb = stage.pushBet(order[0], 10);
+    await stage.pushBet(order[1], 20);
+    await sb;
+    players[order[0]].streetBet = 10;
+    players[order[1]].streetBet = 20;
+    await timed('dealHole', eventMs({ e: 'deal', order }), stage.dealHole(order, mine));
+  },
+  async flop() { const c = draw(3); state?.hand?.board.push(...c); await timed('flop', eventMs({ e: 'board', cards: c }), stage.dealBoard(c)); },
+  async turn() { const c = draw(1); state?.hand?.board.push(...c); await timed('turn', eventMs({ e: 'board', cards: c }), stage.dealBoard(c)); },
+  async river() { const c = draw(1); state?.hand?.board.push(...c); await timed('river', eventMs({ e: 'board', cards: c }), stage.dealBoard(c)); },
+  async bet() {
+    const s = pick(live().length ? live() : [0, 1, 2, 3, 4, 5]);
+    const p = state?.hand?.players?.[s];
+    const total = (p?.streetBet || 0) + BB * pick([1, 2, 3, 7, 26, 140]);
+    if (p) p.streetBet = total;
+    await timed(`pushBet seat ${s} → ${total}`, 350, stage.pushBet(s, total));
+  },
+  async ret() {
+    const ps = state?.hand?.players || {};
+    const s = Object.keys(ps).map(Number).find((k) => ps[k].streetBet > 0);
+    if (s === undefined) return log('no bet to return');
+    const amt = Math.ceil(ps[s].streetBet / 2);
+    ps[s].streetBet -= amt;
+    await timed(`returnBet seat ${s} ${amt}`, 300, stage.returnBet(s, amt));
+  },
+  async collect() {
+    const h = state?.hand;
+    if (!h) return;
+    let add = 0;
+    for (const p of Object.values(h.players)) { add += p.streetBet; p.streetBet = 0; }
+    if (!h.pots.length) h.pots.push({ amount: 0 });
+    h.pots[0].amount += add;
+    await timed('collectBets', 500, stage.collectBets(h.pots.map((p) => ({ amount: p.amount }))));
+  },
+  async fold() {
+    const cand = live().filter((s) => s !== me);
+    const s = cand.length ? pick(cand) : me;
+    if (state?.hand?.players?.[s]) state.hand.players[s].folded = true;
+    await timed(`foldHand seat ${s}`, 350, stage.foldHand(s));
+  },
+  async reveal() {
+    const ss = live().filter((s) => s !== me);
+    await timed('revealHand', 900, Promise.all(ss.map((s) => {
+      const cards = draw(2);
+      state.hand.players[s].cards = cards;
+      return stage.revealHand(s, cards);
+    })));
+  },
+  async award() {
+    const h = state?.hand;
+    const pot = h?.pots?.length ? h.pots.pop() : { amount: 300 };
+    const s = pick(live().length ? live() : [0]);
+    await timed(`awardPot ${pot.amount} → seat ${s}`, 1600, stage.awardPot([{ seat: s, amount: pot.amount }]));
+  },
+  async award2() {
+    const h = state?.hand;
+    const pot = h?.pots?.length ? h.pots.pop() : { amount: 300 };
+    const ls = live();
+    const a = ls[0] ?? 0;
+    const b = ls[1] ?? 3;
+    const half = Math.floor(pot.amount / 2);
+    await timed('awardPot split', 1600, stage.awardPot([{ seat: a, amount: half }, { seat: b, amount: pot.amount - half }]));
+  },
+  async button() { button = (button + 1) % 6; if (state?.hand) state.hand.button = button; await timed('moveButton', 500, stage.moveButton(button)); },
+  async hl() {
+    const vis = [...(state?.hand?.board || [])];
+    for (const p of Object.values(state?.hand?.players || {})) if (p.cards && !p.folded) vis.push(...p.cards);
+    const five = vis.sort(() => Math.random() - 0.5).slice(0, 5);
+    await timed('highlight ' + five.join(' '), 0, stage.highlightCards(five));
+  },
+  async unhl() { await stage.clearHighlight(); log('cleared'); },
+  async syncMidAnim() {
+    const p = actions.newHand();
+    setTimeout(() => { state = midHand(); stage.sync(state); log('synced during dealHole'); }, 650);
+    await p;
+  },
+  async demo() {
+    await actions.newHand();
+    for (const s of live().slice(2)) { const p = state.hand.players[s]; p.streetBet = 60; await stage.pushBet(s, 60); }
+    await actions.fold();
+    await actions.collect();
+    await actions.flop();
+    await actions.bet();
+    await actions.collect();
+    await actions.turn();
+    await actions.river();
+    await actions.reveal();
+    await actions.hl();
+    await actions.award();
+  },
+  markers() { showMarkers = !showMarkers; placeMarkers(); },
+};
+
+const persp = document.getElementById('persp');
+for (let s = 0; s < 6; s++) persp.add(new Option(`seat ${s}`, s));
+persp.onchange = () => {
+  me = Number(persp.value);
+  stage.setPerspective(me);
+  if (state) { state.you.seat = me; actions.syncMid(); }
+};
+
+document.getElementById('panel').addEventListener('click', (e) => {
+  const a = e.target?.dataset?.a;
+  if (a && actions[a]) Promise.resolve(actions[a]()).catch((err) => { console.error(err); log('ERROR ' + err.message); });
+});
+document.getElementById('toggle').onclick = () => document.getElementById('panel').classList.toggle('collapsed');
+
+const markers = document.getElementById('markers');
+let showMarkers = true;
+function placeMarkers() {
+  markers.innerHTML = '';
+  if (!showMarkers) return;
+  const add = (cls, text, p) => {
+    const d = document.createElement('div');
+    d.className = 'mk ' + cls;
+    d.textContent = text;
+    d.style.left = p.x + 'px';
+    d.style.top = p.y + 'px';
+    markers.appendChild(d);
+  };
+  for (let s = 0; s < 6; s++) {
+    add('plate', `${NAMES[s]} · seat ${s}`, stage.screenPos(s, 'plate'));
+    add('small', 'bet' + s, stage.screenPos(s, 'bet'));
+  }
+  add('small', 'pot', stage.screenPos(0, 'pot'));
+  add('small', 'board', stage.screenPos(0, 'board'));
+}
+stage.onLayout(placeMarkers);
+placeMarkers();
+actions.syncMid();
+</script>
+</body>
+</html>

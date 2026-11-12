@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>HUD Harness</title>
+  <link rel="stylesheet" href="/css/style.css">
+  <style>
+    .dev-felt {
+      position: fixed;
+      inset: 0;
+      background: radial-gradient(120% 90% at 50% 45%, #13202c 0%, #090c13 75%);
+    }
+    .dev-table {
+      position: absolute;
+      border-radius: 50%;
+      background: radial-gradient(ellipse at 50% 40%, #167a52 0%, #0e5a3c 55%, #0a4029 100%);
+      box-shadow: 0 0 0 14px #2a1a10, 0 0 0 16px #4a3020, 0 30px 80px rgba(0, 0, 0, 0.7);
+    }
+    .dev-board { position: absolute; display: flex; gap: 6px; transform: translate(-50%, -50%); }
+    .dev-card {
+      width: clamp(30px, 6.5vmin, 58px);
+      aspect-ratio: 5 / 7;
+      border-radius: 6px;
+      background: #f4f1ea;
+      color: #111;
+      display: grid;
+      place-items: center;
+      font: 700 clamp(12px, 2.6vmin, 20px) / 1 system-ui, sans-serif;
+      box-shadow: 0 4px 10px rgba(0, 0, 0, 0.5);
+    }
+    .dev-card.red { color: #c22; }
+    .dev-tools {
+      position: fixed;
+      z-index: 200;
+      left: 8px;
+      bottom: 8px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      max-width: 260px;
+      padding: 6px;
+      border-radius: 10px;
+      background: rgba(0, 0, 0, 0.75);
+      font: 12px system-ui, sans-serif;
+    }
+    .dev-tools button { padding: 6px 8px; border-radius: 6px; border: 1px solid #444; background: #1b2230; color: #ddd; }
+    .dev-tools.collapsed button:not(.dev-toggle) { display: none; }
+    .dev-log { position: fixed; z-index: 200; left: 50%; top: 40%; transform: translateX(-50%); color: #9fe; font: 12px var(--mono); pointer-events: none; }
+  </style>
+</head>
+<body>
+  <div class="dev-felt"><div class="dev-table" id="devTable"></div><div class="dev-board" id="devBoard"></div></div>
+  <div id="hud"></div>
+  <div id="actionbar"></div>
+  <div id="screens"></div>
+  <div class="dev-tools" id="devTools"></div>
+  <div class="dev-log" id="devLog"></div>
+  <script type="module">
+    import { createHud } from '/js/hud.js';
+    import { createActionBar } from '/js/actionbar.js';
+    import { createLobby } from '/js/lobby.js';
+
+    const params = new URLSearchParams(location.search);
+    const log = (msg) => { document.getElementById('devLog').textContent = msg; console.log('[dev]', msg); };
+
+    let youSeat = 0;
+    function geom() {
+      const W = innerWidth, H = innerHeight;
+      const portrait = H > W;
+      const cx = W / 2;
+      const cy = H * (portrait ? 0.43 : 0.45);
+      const rx = W * (portrait ? 0.36 : 0.36);
+      const ry = H * (portrait ? 0.29 : 0.3);
+      return { cx, cy, rx, ry };
+    }
+    function screenPos(seat, spot) {
+      const { cx, cy, rx, ry } = geom();
+      if (spot === 'pot') return { x: cx, y: cy - ry * 0.3 };
+      if (spot === 'board') return { x: cx, y: cy + ry * 0.02 };
+      const r = (seat - youSeat + 6) % 6;
+      const a = Math.PI / 2 + r * (Math.PI * 2 / 6);
+      const k = spot === 'bet' ? 0.58 : 1.04;
+      return { x: cx + rx * k * Math.cos(a), y: cy + ry * k * Math.sin(a) };
+    }
+    function drawTable(board) {
+      const { cx, cy, rx, ry } = geom();
+      Object.assign(document.getElementById('devTable').style, { left: `${cx - rx * 0.86}px`, top: `${cy - ry * 0.86}px`, width: `${rx * 1.72}px`, height: `${ry * 1.72}px` });
+      const b = document.getElementById('devBoard');
+      const p = screenPos(null, 'board');
+      Object.assign(b.style, { left: `${p.x}px`, top: `${p.y}px` });
+      b.replaceChildren(...(board || []).map((c) => {
+        const d = document.createElement('div');
+        const suit = { s: '♠', h: '♥', d: '♦', c: '♣' }[c[1]];
+        d.className = 'dev-card' + ('hd'.includes(c[1]) ? ' red' : '');
+        d.textContent = (c[0] === 'T' ? '10' : c[0]) + suit;
+        return d;
+      }));
+    }
+
+    const CFG = { buyIn: 1000, smallBlind: 5, bigBlind: 10, turnSeconds: 30 };
+    const share = { lan: ['http://192.168.1.42:3000', 'http://10.0.0.7:3000'], tunnel: 'https://quiet-river-1234.trycloudflare.com' };
+    const seat = (i, name, stack, extra = {}) => ({ seat: i, name, stack, busted: false, connected: true, away: false, isHost: false, ...extra });
+
+    function lobbyView({ host }) {
+      return {
+        room: { code: 'K7QX', status: 'lobby', hostId: 'p0', config: CFG, share },
+        seats: [seat(0, 'Sam', 1000, { isHost: true }), seat(1, 'Alice', 1000), seat(2, 'Bob', 1000, { connected: false }), null, null, null],
+        hand: null,
+        you: { playerId: host ? 'p0' : 'p1', seat: host ? 0 : 1, isHost: host, legal: null },
+      };
+    }
+
+    function handView({ toAct = 0, phase = 'turn', variant = 'raise' } = {}) {
+      const seats = [
+        seat(0, 'Sam', 2950, { isHost: true }),
+        seat(1, 'Alice', 2130),
+        seat(2, 'Bob', 880),
+        seat(3, 'Chen Wei-Long', 0),
+        seat(4, 'Dana', 640, { away: true }),
+        seat(5, 'Eli', 1200, { connected: false }),
+      ];
+      const players = {
+        0: { folded: false, allIn: false, streetBet: 50, cards: ['Qs', 'Qh'] },
+        1: { folded: false, allIn: false, streetBet: 200, cards: null },
+        2: { folded: true, allIn: false, streetBet: 0, cards: null },
+        3: { folded: false, allIn: true, streetBet: 150, cards: null },
+        4: { folded: false, allIn: false, streetBet: 0, cards: null },
+        5: { folded: false, allIn: false, streetBet: 0, cards: null },
+      };
+      let currentBet = 200;
+      let legal = { check: false, call: 150, raise: { min: 350, max: 3000 } };
+      if (variant === 'bet') {
+        for (const p of Object.values(players)) p.streetBet = 0;
+        players[3].streetBet = 0;
+        currentBet = 0;
+        legal = { check: true, call: 0, raise: { min: 10, max: 2950 } };
+      } else if (variant === 'short') {
+        seats[0].stack = 120;
+        legal = { check: false, call: 120, raise: null };
+      } else if (variant === 'allin-only') {
+        seats[0].stack = 300;
+        legal = { check: false, call: 150, raise: { min: 350, max: 350 } };
+      }
+      const pots = [{ amount: 860 }];
+      const potTotal = pots[0].amount + Object.values(players).reduce((s, p) => s + p.streetBet, 0);
+      return {
+        room: { code: 'K7QX', status: 'playing', hostId: 'p0', config: CFG, share },
+        seats,
+        hand: { handId: 17, phase, button: 5, sbSeat: 0, bbSeat: 1, board: ['Ah', 'Kd', '7c', '2s'], pots, potTotal, currentBet, toAct, turnId: 42, remainingMs: 22000, turnMs: 30000, players },
+        you: { playerId: 'p0', seat: 0, isHost: true, legal: toAct === 0 ? legal : null },
+      };
+    }
+
+    let hud = null;
+    let ds = null;
+    let raf = 0;
+    let muted = false;
+    const lobby = createLobby(document.getElementById('screens'), {
+      onCreate: (a) => log(`onCreate ${JSON.stringify(a)}`),
+      onJoin: (a) => log(`onJoin ${JSON.stringify(a)}`),
+      onStart: () => log('onStart'),
+      onCloseTable: () => log('onCloseTable'),
+      onLeave: () => log('onLeave'),
+    });
+    const bar = createActionBar(document.getElementById('actionbar'), {
+      onAction: (a) => log(`onAction ${JSON.stringify(a)}`),
+    });
+
+    function freshHud() {
+      hud?.destroy();
+      hud = createHud(document.getElementById('hud'), {
+        screenPos,
+        onMuteToggle: () => { muted = !muted; log(`muted=${muted}`); },
+        onCloseTable: () => log('hud onCloseTable'),
+        onStart: () => log('hud onStart'),
+        isMuted: () => muted,
+      });
+    }
+
+    function loop() {
+      if (ds?.turnEndsAt != null) {
+        const left = ds.turnEndsAt - performance.now();
+        if (left <= 0) ds.turnEndsAt = performance.now() + ds.hand.turnMs;
+        if (ds.you.legal) bar.setTimeLeft(Math.max(0, left));
+      }
+      if (ds) hud.render(ds);
+      raf = requestAnimationFrame(loop);
+    }
+
+    function inHand(view, extras = {}) {
+      ds = { ...view, turnEndsAt: null, bubbles: {}, handNames: null, winners: null, banner: null, ...extras };
+      youSeat = view.you.seat;
+      freshHud();
+      drawTable(view.hand?.board);
+      hud.render(ds);
+      hud.layout();
+      const me = view.hand?.players?.[view.you.seat];
+      if (view.you.legal) {
+        bar.show({ legal: view.you.legal, hand: view.hand, stack: view.seats[view.you.seat].stack, streetBet: me?.streetBet ?? 0, bigBlind: view.room.config.bigBlind });
+      }
+    }
+
+    const BUBBLES = { 1: 'Raise to 200', 2: 'Fold', 3: 'All-in 150', 4: 'Call 200', 5: 'Check' };
+    const STATES = {
+      home: () => lobby.showHome({ name: 'Sam' }),
+      'home-join': () => lobby.showHome({ code: 'k7qx', name: 'Sam' }),
+      'home-error': () => lobby.showHome({ code: 'ZZZZ', name: 'Sam', error: 'No table with code ZZZZ' }),
+      connecting: () => lobby.showConnecting('Joining table K7QX…'),
+      'waiting-host': () => { lobby.showWaiting(lobbyView({ host: true })); },
+      'waiting-guest': () => { lobby.showWaiting(lobbyView({ host: false })); },
+      'waiting-solo': () => { const v = lobbyView({ host: true }); v.seats = [v.seats[0], null, null, null, null, null]; lobby.showWaiting(v); },
+      turn: () => inHand(handView(), { turnEndsAt: performance.now() + 22000, bubbles: BUBBLES }),
+      'turn-bet': () => inHand(handView({ variant: 'bet' }), { turnEndsAt: performance.now() + 9000, bubbles: { 5: 'Check' } }),
+      'turn-short': () => inHand(handView({ variant: 'short' }), { turnEndsAt: performance.now() + 6000, bubbles: BUBBLES }),
+      'turn-allin-only': () => inHand(handView({ variant: 'allin-only' }), { turnEndsAt: performance.now() + 20000, bubbles: BUBBLES }),
+      'not-turn': () => inHand(handView({ toAct: 1 }), { turnEndsAt: performance.now() + 14000, bubbles: { 2: 'Fold', 3: 'All-in 150', 5: 'Check' } }),
+      showdown: () => {
+        const v = handView({ phase: 'complete' });
+        v.hand.toAct = null;
+        v.you.legal = null;
+        v.hand.board = ['Ah', 'Kd', '7c', '2s', 'Kh'];
+        for (const p of Object.values(v.hand.players)) p.streetBet = 0;
+        v.hand.pots = [{ amount: 1260 }];
+        inHand(v, {
+          handNames: { 0: 'Two Pair, Kings and Queens', 1: 'Full House, Kings over Aces', 3: 'Two Pair, Aces and Kings', 4: 'Pair of Kings', 5: 'Pair of Kings' },
+          winners: { 1: 1260 },
+          banner: 'Alice wins 1,260 with a Full House',
+        });
+      },
+      'between-hands': () => {
+        const v = handView();
+        v.room.status = 'lobby';
+        v.hand.phase = 'complete';
+        v.hand.toAct = null;
+        v.seats[3].busted = true;
+        v.seats[3].stack = 0;
+        v.you.legal = null;
+        inHand(v, { banner: 'Waiting for players…' });
+      },
+      busted: () => {
+        const v = handView({ toAct: 1 });
+        v.seats[0].busted = true;
+        v.seats[0].stack = 0;
+        v.seats[0].isHost = false;
+        v.you.isHost = false;
+        delete v.hand.players[0];
+        inHand(v, { turnEndsAt: performance.now() + 18000, bubbles: { 2: 'Fold' } });
+      },
+      scoreboard: () => lobby.showScoreboard([
+        { name: 'Alice', stack: 3390, net: 2390, handsWon: 9 },
+        { name: 'Sam', stack: 1500, net: 500, handsWon: 6 },
+        { name: 'Eli', stack: 1000, net: 0, handsWon: 3 },
+        { name: 'Bob', stack: 110, net: -890, handsWon: 2 },
+        { name: 'Chen Wei-Long', stack: 0, net: -1000, handsWon: 1 },
+        { name: 'Dana', stack: 0, net: -1000, handsWon: 0 },
+      ], { onNewTable: () => log('onNewTable') }),
+    };
+
+    function go(name) {
+      ds = null;
+      bar.hide();
+      lobby.hide();
+      freshHud();
+      drawTable(null);
+      document.getElementById('devLog').textContent = '';
+      STATES[name]();
+      const keep = ['clean', 'still'].filter((k) => params.has(k)).map((k) => `&${k}`).join('');
+      history.replaceState(null, '', `?state=${name}${keep}`);
+    }
+
+    const tools = document.getElementById('devTools');
+    const toggle = document.createElement('button');
+    toggle.className = 'dev-toggle';
+    toggle.textContent = 'dev';
+    toggle.onclick = () => tools.classList.toggle('collapsed');
+    tools.append(toggle);
+    for (const name of Object.keys(STATES)) {
+      const b = document.createElement('button');
+      b.textContent = name;
+      b.onclick = () => go(name);
+      tools.append(b);
+    }
+    if (params.has('still')) {
+      const st = document.createElement('style');
+      st.textContent = '*,*::before,*::after{transition:none!important;animation:none!important}';
+      document.head.append(st);
+    }
+    if (params.has('clean')) tools.hidden = true;
+    else tools.classList.add('collapsed');
+
+    addEventListener('resize', () => { drawTable(ds?.hand?.board); hud?.layout(); });
+    window.dev = { go, get ds() { return ds; }, bar, lobby, get hud() { return hud; } };
+    go(STATES[params.get('state')] ? params.get('state') : 'turn');
+    loop();
+  </script>
+</body>
+</html>
