@@ -26,6 +26,7 @@ function handView(room, hand, viewerSeat) {
       folded: p.folded,
       allIn: !p.folded && table.seats[seat].stack === 0,
       streetBet: p.streetBet,
+      committed: p.committed,
       cards: visible ? [p.hole[0], p.hole[1]] : null,
     };
   }

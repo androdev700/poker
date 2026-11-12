@@ -86,7 +86,7 @@ test('the view has the documented shape', () => {
   assert.equal(h.turnMs, 30_000);
   assert.ok(h.remainingMs > 30_000, 'deadline includes the deal animation budget');
   assert.deepEqual(Object.keys(h.players).sort(), ['0', '1', '2']);
-  assert.deepEqual(Object.keys(h.players[0]).sort(), ['allIn', 'cards', 'folded', 'streetBet']);
+  assert.deepEqual(Object.keys(h.players[0]).sort(), ['allIn', 'cards', 'committed', 'folded', 'streetBet']);
   assert.equal(view.you.playerId, players[1].id);
   assert.equal(view.you.seat, 1);
   assert.equal(view.you.isHost, false);

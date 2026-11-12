@@ -9,6 +9,8 @@ const SLOW_FRAMES = 3;
 const MAX_BACKLOG = 2;
 const STEP_SLACK_MS = 1500;
 
+const VERB = { check: 'Check', call: 'Call', bet: 'Bet', raise: 'Raise' };
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, Math.max(0, ms)));
 const clone = (v) => (typeof structuredClone === 'function' ? structuredClone(v) : JSON.parse(JSON.stringify(v)));
 
@@ -36,7 +38,7 @@ export function createDirector({ stage, hud, actionbar, sound, store }) {
   let winSoundHand = null;
 
   function emptyDs() {
-    return { room: null, seats: [], hand: null, you: null, turnEndsAt: null, bubbles: {}, handNames: {}, winners: {}, banner: null, highlight: null };
+    return { room: null, seats: [], hand: null, you: null, turnEndsAt: null, bubbles: {}, handNames: {}, winners: {}, results: null, banner: null, highlight: null };
   }
 
   const mySeat = () => ds.you?.seat ?? store.session?.seat ?? -1;
@@ -49,6 +51,7 @@ export function createDirector({ stage, hud, actionbar, sound, store }) {
     ds.bubbles = {};
     ds.handNames = {};
     ds.winners = {};
+    ds.results = null;
     ds.banner = null;
     ds.highlight = null;
     ds.showdown = undefined;
@@ -79,7 +82,7 @@ export function createDirector({ stage, hud, actionbar, sound, store }) {
       const turnId = ds.hand?.turnId ?? 0;
       resetExtras();
       const players = {};
-      for (const s of ev.seats) players[s] = { folded: false, allIn: false, streetBet: 0, cards: null };
+      for (const s of ev.seats) players[s] = { folded: false, allIn: false, streetBet: 0, committed: 0, cards: null };
       ds.turnEndsAt = null;
       if (ds.room) ds.room = { ...ds.room, status: 'playing' };
       ds.hand = {
@@ -107,12 +110,15 @@ export function createDirector({ stage, hud, actionbar, sound, store }) {
     *blind(ev) {
       const p = playerOf(ev.seat);
       const sv = seatOf(ev.seat);
-      if (p) p.streetBet += ev.amount;
+      if (p) {
+        p.streetBet += ev.amount;
+        p.committed += ev.amount;
+      }
       if (sv) sv.stack -= ev.amount;
       if (p && sv && sv.stack <= 0) p.allIn = true;
       addToPot(ev.amount);
       if (ds.hand && p) ds.hand.currentBet = Math.max(ds.hand.currentBet, p.streetBet);
-      ds.bubbles[ev.seat] = `${ev.kind === 'small' ? 'SB' : 'BB'} ${fmtChips(ev.amount)}`;
+      ds.bubbles[ev.seat] = ev.kind === 'small' ? 'SB' : 'BB';
       const total = p?.streetBet ?? ev.amount;
       yield () => {
         play('chips', { count: 2 });
@@ -161,19 +167,12 @@ export function createDirector({ stage, hud, actionbar, sound, store }) {
       if (sv) sv.stack -= ev.added;
       if (p) {
         p.streetBet = ev.to;
+        p.committed += ev.added;
         p.allIn = !!ev.allIn;
       }
       addToPot(ev.added);
       if (ds.hand) ds.hand.currentBet = Math.max(ds.hand.currentBet, ev.to);
-      ds.bubbles[ev.seat] = ev.allIn
-        ? `All-in ${fmtChips(ev.to)}`
-        : ev.kind === 'check'
-          ? 'Check'
-          : ev.kind === 'call'
-            ? `Call ${fmtChips(ev.added)}`
-            : ev.kind === 'bet'
-              ? `Bet ${fmtChips(ev.to)}`
-              : `Raise to ${fmtChips(ev.to)}`;
+      ds.bubbles[ev.seat] = VERB[ev.kind] || 'Bet';
       yield () => {
         if (ev.kind === 'check') play('check');
         else if (ev.allIn) {
@@ -187,7 +186,10 @@ export function createDirector({ stage, hud, actionbar, sound, store }) {
     *refund(ev) {
       const p = playerOf(ev.seat);
       const sv = seatOf(ev.seat);
-      if (p) p.streetBet = Math.max(0, p.streetBet - ev.amount);
+      if (p) {
+        p.streetBet = Math.max(0, p.streetBet - ev.amount);
+        p.committed = Math.max(0, p.committed - ev.amount);
+      }
       addToPot(-ev.amount);
       yield () => stage.returnBet(ev.seat, ev.amount);
       if (sv) sv.stack += ev.amount;
@@ -261,6 +263,14 @@ export function createDirector({ stage, hud, actionbar, sound, store }) {
     *win(ev, entry) {
       const ws = ev.winners.filter((w) => w.amount > 0);
       for (const w of ws) ds.winners[w.seat] = (ds.winners[w.seat] || 0) + w.amount;
+      const pots = (ds.results?.pots || []).filter((p) => p.index !== ev.potIndex);
+      pots.push({
+        index: ev.potIndex,
+        amount: ev.amount,
+        uncontested: !!ev.uncontested,
+        winners: ev.winners.map((w) => ({ seat: w.seat, amount: w.amount })),
+      });
+      ds.results = { pots: pots.sort((a, b) => a.index - b.index) };
       ds.banner = bannerFor(ev, ev.uncontested ? null : ds.showdown);
       if (!ev.uncontested && ds.best5) {
         const cards = new Set(ds.highlight || []);
@@ -296,7 +306,6 @@ export function createDirector({ stage, hud, actionbar, sound, store }) {
     *bust(ev) {
       const sv = seatOf(ev.seat);
       if (sv) sv.busted = true;
-      ds.bubbles[ev.seat] = 'Busted';
       yield () => {
         play('bust');
         return null;
@@ -331,6 +340,7 @@ export function createDirector({ stage, hud, actionbar, sound, store }) {
       bubbles: same ? prev.bubbles : {},
       handNames: same ? prev.handNames : {},
       winners: same ? prev.winners : {},
+      results: same ? prev.results : null,
       banner: same ? prev.banner : null,
       highlight: same ? prev.highlight : null,
       showdown: same ? prev.showdown : undefined,
@@ -379,6 +389,8 @@ export function createDirector({ stage, hud, actionbar, sound, store }) {
     current = null;
     for (const entry of queue) {
       if (pending.length) finalize(pending.at(-1));
+      // Verbs from before a reconnect may belong to an older bet than the snapshot's streetBet.
+      if (entry.snapshot) ds.bubbles = {};
       for (const ev of entry.events) applySilently(ev, entry);
       pending.push(entry);
     }
@@ -494,6 +506,7 @@ export function createDirector({ stage, hud, actionbar, sound, store }) {
     const entry = {
       events: Array.isArray(msg.events) ? msg.events : [],
       state: msg.state,
+      snapshot,
       turnEndsAt: h && h.toAct != null && h.remainingMs > 0 ? performance.now() + h.remainingMs : null,
     };
     queue.push(entry);

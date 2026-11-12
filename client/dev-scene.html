@@ -22,12 +22,28 @@
   #panel button, #panel select { font: inherit; background: #23272f; color: #eee; border: 1px solid #444; border-radius: 6px; padding: 4px 7px; cursor: pointer; }
   #panel button:hover { background: #313744; }
   #log { flex-basis: 100%; color: #9fb4d0; min-height: 1.3em; }
+  #dbg { position: absolute; inset: 0; pointer-events: none; }
+  .ol { position: absolute; box-sizing: border-box; border: 1px solid; font: 9px/1 system-ui, sans-serif; color: #fff; }
+  .ol > span { position: absolute; left: 1px; top: 1px; background: rgba(0,0,0,.55); padding: 1px 2px; white-space: nowrap; }
+  .ol.free { border: 1px dashed #4dd0e1; }
+  .ol.plate { border: 2px solid #ffb300; background: rgba(255,179,0,.12); }
+  .ol.plate.bad { border-color: #ff1744; background: rgba(255,23,68,.25); }
+  .ol.boardslot { border: 1px dashed #b2ff59; }
+  .ol.pot { border: 2px solid #e040fb; background: rgba(224,64,251,.18); }
+  .ol.hero { border: 1px dashed #fff; }
+  .ol.r3d { border-color: rgba(64,196,255,.95); }
+  .ol.r3d.board { border-color: #76ff03; }
+  .ol.r3d.potPile { border-color: #ff4081; }
+  .ol.r3d.button { border-color: #ffff00; }
+  .dot { position: absolute; width: 6px; height: 6px; margin: -3px 0 0 -3px; border-radius: 50%; background: #e040fb; }
+  .dock { position: absolute; left: 0; right: 0; background: rgba(255,255,255,.06); border: 0 dashed rgba(255,255,255,.3); }
 </style>
 </head>
 <body>
 <div id="wrap">
   <canvas id="c"></canvas>
   <div id="markers"></div>
+  <div id="dbg"></div>
 </div>
 <div id="panel">
   <button id="toggle">☰</button>
@@ -51,6 +67,17 @@
   <button data-a="syncMidAnim">sync mid-animation</button>
   <button data-a="demo">full hand</button>
   <button data-a="markers">markers</button>
+  <label>insets <select id="preset">
+    <option value="none">none (defaults)</option>
+    <option value="auto" selected>auto (size class)</option>
+    <option value="phone-portrait">phone-portrait</option>
+    <option value="tall">tall</option>
+    <option value="phone-landscape">phone-landscape</option>
+    <option value="desktop">desktop</option>
+  </select></label>
+  <label>pots <select id="pots"><option>1</option><option selected>2</option><option>3</option></select></label>
+  <button data-a="outlines">outlines</button>
+  <button data-a="check">check</button>
   <div id="log"></div>
 </div>
 <script type="module">
@@ -99,7 +126,7 @@ function midHand() {
   }
   v.hand = {
     handId: Math.floor(Math.random() * 1e6), phase: 'flop', button, sbSeat: (button + 1) % 6, bbSeat: (button + 2) % 6,
-    board: draw(3), pots: [{ amount: 460 }, { amount: 135 }], potTotal: 740, currentBet: 60, toAct: 5, turnId: 3,
+    board: draw(3), pots: [{ amount: 460 }, { amount: 135 }, { amount: 2400 }].slice(0, potCount()), potTotal: 740, currentBet: 60, toAct: 5, turnId: 3,
     remainingMs: 20000, turnMs: 30000, players,
   };
   return v;
@@ -220,6 +247,8 @@ const actions = {
     await actions.award();
   },
   markers() { showMarkers = !showMarkers; placeMarkers(); },
+  outlines() { showOutlines = !showOutlines; drawOutlines(); },
+  check() { const r = check(); log(r.fails.length ? 'FAIL ' + r.fails.join(' | ') : `ok — ${r.summary}`); console.log(r); },
 };
 
 const persp = document.getElementById('persp');
@@ -237,11 +266,12 @@ document.getElementById('panel').addEventListener('click', (e) => {
 document.getElementById('toggle').onclick = () => document.getElementById('panel').classList.toggle('collapsed');
 
 const markers = document.getElementById('markers');
-let showMarkers = true;
+let showMarkers = false;
 function placeMarkers() {
   markers.innerHTML = '';
   if (!showMarkers) return;
   const add = (cls, text, p) => {
+    if (!p) return;
     const d = document.createElement('div');
     d.className = 'mk ' + cls;
     d.textContent = text;
@@ -258,6 +288,160 @@ function placeMarkers() {
 }
 stage.onLayout(placeMarkers);
 placeMarkers();
+
+// Insets the HUD reserves per size class (hud-design.md); 'auto' picks one from the viewport like the HUD does.
+const PRESETS = {
+  none: null,
+  'phone-portrait': { top: 60, bottom: 104, left: 0, right: 0, plates: { side: { w: 76, h: 100 }, top: { w: 148, h: 56 }, hero: null } },
+  tall: { top: 60, bottom: 104, left: 0, right: 0, plates: { side: { w: 172, h: 78 }, top: { w: 172, h: 78 }, hero: null } },
+  'phone-landscape': { top: 60, bottom: 0, left: 0, right: 0, plates: { side: { w: 148, h: 56 }, top: { w: 148, h: 56 }, hero: { w: 148, h: 56 } } },
+  desktop: { top: 60, bottom: 0, left: 0, right: 0, plates: { side: { w: 172, h: 78 }, top: { w: 172, h: 78 }, hero: { w: 172, h: 78 } } },
+};
+const presetEl = document.getElementById('preset');
+const potsEl = document.getElementById('pots');
+function potCount() { return Number(potsEl?.value || 2); }
+function sizeClass() {
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  if (w / h < 1.05) return w < 600 ? 'phone-portrait' : 'tall';
+  return h <= 520 ? 'phone-landscape' : 'desktop';
+}
+function currentInsets() {
+  const name = presetEl.value === 'auto' ? sizeClass() : presetEl.value;
+  return PRESETS[name];
+}
+function applyInsets() {
+  const changed = stage.setInsets(currentInsets() || {});
+  drawOutlines();
+  return changed;
+}
+presetEl.onchange = applyInsets;
+potsEl.onchange = () => { if (state?.hand) { state = midHand(); stage.sync(state); } drawOutlines(); };
+addEventListener('resize', () => requestAnimationFrame(applyInsets));
+
+const dbg = document.getElementById('dbg');
+let showOutlines = true;
+function box(cls, r, label) {
+  const d = document.createElement('div');
+  d.className = 'ol ' + cls;
+  Object.assign(d.style, { left: r.l + 'px', top: r.t + 'px', width: Math.max(0, r.r - r.l) + 'px', height: Math.max(0, r.b - r.t) + 'px' });
+  if (label) { const s = document.createElement('span'); s.textContent = label; d.appendChild(s); }
+  dbg.appendChild(d);
+  return d;
+}
+// Mirrors the stage's fallback when setInsets was never called: the size class's plates, no hero plate.
+function plateSizes() {
+  const I = currentInsets();
+  if (I?.plates?.side) return { side: I.plates.side, top: I.plates.top || I.plates.side, hero: I.plates.hero || null };
+  const d = PRESETS[sizeClass()].plates;
+  return { side: d.side, top: d.top, hero: null };
+}
+function freeBox() {
+  const I = currentInsets() || { top: 0, bottom: 0, left: 0, right: 0 };
+  return { l: I.left + 6, t: I.top + 6, r: canvas.clientWidth - I.right - 6, b: canvas.clientHeight - I.bottom - 6 };
+}
+function plateBoxes() {
+  const P = plateSizes();
+  const out = [];
+  for (let s = 0; s < 6; s++) {
+    const vi = (s - me + 6) % 6;
+    const size = vi === 0 ? P.hero : vi === 3 ? P.top : P.side;
+    const a = stage.screenPos(s, 'plate');
+    if (!size || !a) continue;
+    const hw = size.w / 2, hh = size.h / 2;
+    const k = hw * Math.abs(a.ux) + hh * Math.abs(a.uy);
+    const cx = a.x + a.ux * k, cy = a.y + a.uy * k;
+    out.push({ seat: s, vi, a, l: cx - hw, t: cy - hh, r: cx + hw, b: cy + hh });
+  }
+  return out;
+}
+function potBox() {
+  const p = stage.screenPos(null, 'pot', { pots: potCount() });
+  if (!p) return null;
+  const w = Math.min(p.maxW, 220), H = 28;
+  const r = p.align === 'below-board' ? { l: p.x - w / 2, r: p.x + w / 2, t: p.y, b: p.y + H } : { l: p.x - w, r: p.x, t: p.y - H / 2, b: p.y + H / 2 };
+  return { ...r, p };
+}
+const hit = (a, b) => Math.min(a.r, b.r) - Math.max(a.l, b.l) > 0.5 && Math.min(a.b, b.b) - Math.max(a.t, b.t) > 0.5;
+const inside = (a, f) => a.l >= f.l - 0.5 && a.t >= f.t - 0.5 && a.r <= f.r + 0.5 && a.b <= f.b + 0.5;
+function check() {
+  const F = freeBox();
+  const plates = plateBoxes();
+  const board = stage.screenPos(null, 'board');
+  const pot = potBox();
+  const rects = stage.screenRects();
+  const fails = [];
+  for (const p of plates) {
+    if (!inside(p, F)) fails.push(`plate${p.seat} outside free`);
+    if (hit(p, board)) fails.push(`plate${p.seat} covers board`);
+    if (pot && hit(p, pot)) fails.push(`plate${p.seat} covers pot`);
+    for (const q of rects) if (hit(p, q)) fails.push(`plate${p.seat} covers ${q.kind}${q.seat ?? ''}`);
+  }
+  for (let i = 0; i < plates.length; i++) for (let j = i + 1; j < plates.length; j++) if (hit(plates[i], plates[j])) fails.push(`plate${plates[i].seat}×plate${plates[j].seat}`);
+  if (pot) {
+    if (hit(pot, board)) fails.push('pot covers board');
+    for (const q of rects) if (q.kind !== 'board' && hit(pot, q)) fails.push(`pot covers ${q.kind}${q.seat ?? ''}`);
+  }
+  const card = board ? ((board.r - board.l) * 0.62) / 3.46 : 0;
+  const margins = plates.length ? {
+    l: Math.round(Math.min(...plates.map((p) => p.l)) - F.l), r: Math.round(F.r - Math.max(...plates.map((p) => p.r))),
+    t: Math.round(Math.min(...plates.map((p) => p.t)) - F.t), b: Math.round(F.b - Math.max(...plates.map((p) => p.b))),
+  } : null;
+  return { fails, rects: rects.length, plates: plates.length, board, pot: pot?.p, margins,
+    summary: `${canvas.clientWidth}x${canvas.clientHeight} board ${Math.round(board.r - board.l)}px (≈card ${card.toFixed(1)}px) plate margins ${JSON.stringify(margins)} pot maxW ${Math.round(pot?.p.maxW)}` };
+}
+function drawOutlines() {
+  dbg.innerHTML = '';
+  if (!showOutlines || !stage.screenPos(null, 'board')) return;
+  const F = freeBox();
+  box('free', F, 'free');
+  const I = currentInsets();
+  if (I?.bottom) { const d = document.createElement('div'); d.className = 'dock'; d.style.bottom = '0'; d.style.height = I.bottom + 'px'; dbg.appendChild(d); }
+  const board = stage.screenPos(null, 'board');
+  box('boardslot', board, 'board slots');
+  const pot = potBox();
+  for (const p of plateBoxes()) {
+    const bad = !inside(p, F) || hit(p, board) || (pot && hit(p, pot));
+    box('plate' + (bad ? ' bad' : ''), p, `${NAMES[p.seat]} s${p.seat}`);
+    const d = document.createElement('div'); d.className = 'dot'; d.style.left = p.a.x + 'px'; d.style.top = p.a.y + 'px'; d.style.background = '#ffb300'; dbg.appendChild(d);
+  }
+  if (pot) {
+    box('pot', pot, `pot ${pot.p.align} maxW ${Math.round(pot.p.maxW)}`);
+    const d = document.createElement('div'); d.className = 'dot'; d.style.left = pot.p.x + 'px'; d.style.top = pot.p.y + 'px'; dbg.appendChild(d);
+  }
+  const hero = stage.screenPos(null, 'hero');
+  if (hero) box('hero', hero, 'hero');
+  for (const q of stage.screenRects()) box('r3d ' + q.kind, q, q.kind + (q.seat ?? ''));
+}
+stage.onLayout(drawOutlines);
+(function tick() { if (showOutlines) drawOutlines(); requestAnimationFrame(tick); })();
+// Every seat in, every hand shown, the largest piles chips.js can build, the button on seat `btn`.
+function worst(btn, pots) {
+  shuffle();
+  const v = baseView();
+  const big = 31310 * BB;
+  const players = {};
+  for (let s = 0; s < 6; s++) players[s] = { folded: false, allIn: false, streetBet: big, cards: draw(2) };
+  v.hand = { handId: 1, phase: 'river', button: btn, sbSeat: (btn + 1) % 6, bbSeat: (btn + 2) % 6, board: draw(5),
+    pots: Array.from({ length: pots }, () => ({ amount: big })), potTotal: big * pots, currentBet: big, toAct: null, turnId: 9,
+    remainingMs: 0, turnMs: 0, players };
+  return v;
+}
+async function fullCheck() {
+  const out = new Set();
+  const warn = new Set();
+  for (const pots of [1, 2, 3]) for (let b = 0; b < 6; b++) {
+    potsEl.value = String(pots);
+    state = worst(b, pots);
+    stage.sync(state);
+    for (const f of check().fails) out.add(`pots${pots}/btn${b}: ${f}`);
+    const rects = stage.screenRects();
+    const btn = rects.find((q) => q.kind === 'button');
+    for (const q of rects) if (btn && q !== btn && hit(btn, q)) warn.add(`pots${pots}/btn${b}: button×${q.kind}${q.seat ?? ''}`);
+  }
+  return { summary: check().summary, fails: [...out], buttonOverlaps: [...warn] };
+}
+window.dev = { stage, check, fullCheck, worst, applyInsets, PRESETS, actions, setPreset(name) { presetEl.value = name; return applyInsets(); } };
+applyInsets();
 actions.syncMid();
 </script>
 </body>

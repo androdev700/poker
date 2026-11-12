@@ -22,12 +22,13 @@ let resuming = false;
 let expectSnapshot = false;
 
 const barEl = document.getElementById('actionbar');
-let barInset = 0;
 
 const hud = createHud(hudRoot, {
   screenPos: stage.screenPos,
   isMuted: sound.isMuted,
-  bottomInset: () => barInset,
+  isConnected: () => net.connected,
+  onSizeClass: () => syncInsets(),
+  onBack: () => net.send({ t: 'back' }),
   onMuteToggle: () => {
     sound.setMuted(!sound.isMuted());
     sound.unlock();
@@ -47,24 +48,28 @@ const bar = createActionBar(barEl, {
   },
 });
 
-/** Only a bar docked across the full width covers the bottom nameplate; measured collapsed, at show time. */
-function measureBar() {
-  const shown = !barEl.classList.contains('is-hidden');
-  const next = shown && barEl.offsetLeft < 1 ? barEl.offsetHeight : 0;
-  if (next === barInset) return;
-  barInset = next;
-  hud.layout();
+function syncInsets() {
+  stage.setInsets?.(hud.metrics());
 }
+
+/** Offsets ignore the slide-in transform, so plates move out of the bar's final box straight away. */
+function reportBar() {
+  if (barEl.classList.contains('is-hidden')) return hud.setBar(null);
+  const l = barEl.offsetLeft;
+  const t = barEl.offsetTop;
+  hud.setBar({ l, t, r: l + barEl.offsetWidth, b: t + barEl.offsetHeight });
+}
+new ResizeObserver(reportBar).observe(barEl);
 
 const actionbar = {
   ...bar,
   show(args) {
     bar.show(args);
-    measureBar();
+    reportBar();
   },
   hide() {
     bar.hide();
-    measureBar();
+    reportBar();
   },
 };
 
@@ -104,6 +109,7 @@ const net = createNet({
 
 const director = createDirector({ stage, hud, actionbar, sound, store });
 stage.onLayout(() => hud.layout());
+syncInsets();
 
 const connPill = document.createElement('div');
 connPill.className = 'conn-pill glass';
@@ -112,19 +118,10 @@ connPill.textContent = 'Reconnecting…';
 connPill.hidden = true;
 document.body.append(connPill);
 
-const awayPill = document.createElement('button');
-awayPill.type = 'button';
-awayPill.className = 'away-pill glass';
-awayPill.textContent = 'You were away — tap to play';
-awayPill.hidden = true;
-awayPill.addEventListener('click', () => net.send({ t: 'back' }));
-document.body.append(awayPill);
-
 function updateConnPill() {
   const inGame = !!store.session && (screen === 'table' || screen === 'waiting');
   connPill.hidden = !(inGame && !net.connected);
-  const me = store.view?.seats?.[store.view.you?.seat];
-  awayPill.hidden = !(inGame && net.connected && screen === 'table' && me?.away && !me.busted);
+  hud.refresh();
 }
 
 function setUrlRoom(code) {
@@ -165,7 +162,10 @@ function route() {
   if (screen === 'scoreboard' || screen === 'notice' || !store.session) return;
   const v = store.view;
   if (!v) return;
-  hudRoot.hidden = false;
+  if (hudRoot.hidden) {
+    hudRoot.hidden = false;
+    hud.layout();
+  }
   if (v.room.status === 'lobby' && v.hand === null) {
     screen = 'waiting';
     lobby.showWaiting(v);
@@ -287,15 +287,20 @@ document.addEventListener('visibilitychange', () => {
 });
 
 let layoutQueued = false;
-window.addEventListener('resize', () => {
+function queueLayout() {
   if (layoutQueued) return;
   layoutQueued = true;
   requestAnimationFrame(() => {
     layoutQueued = false;
-    if (!barEl.classList.contains('is-raising')) measureBar();
+    syncInsets();
+    reportBar();
     hud.layout();
   });
-});
+}
+window.addEventListener('resize', queueLayout);
+// A 180° turn on iOS moves the notch to the other side without resizing the viewport.
+window.screen.orientation?.addEventListener?.('change', queueLayout);
+window.addEventListener('orientationchange', queueLayout);
 
 function boot() {
   sound.installAutoUnlock();

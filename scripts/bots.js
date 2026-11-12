@@ -575,10 +575,12 @@ class Bot {
       this.check(
         isSeat(seat) &&
           seats[seat] !== null &&
-          sameKeys(p, ['folded', 'allIn', 'streetBet', 'cards']) &&
+          sameKeys(p, ['folded', 'allIn', 'streetBet', 'committed', 'cards']) &&
           typeof p.folded === 'boolean' &&
           typeof p.allIn === 'boolean' &&
           isNonNeg(p.streetBet) &&
+          isNonNeg(p.committed) &&
+          p.committed >= p.streetBet &&
           (p.cards === null || isHole(p.cards)),
         `malformed hand.players[${key}]`,
       );
@@ -586,6 +588,8 @@ class Bot {
     }
     const streetBets = sum(Object.values(hand.players), (p) => p.streetBet);
     this.check(hand.potTotal === sum(hand.pots, (p) => p.amount) + streetBets, 'potTotal != pots + street bets');
+    if (hand.phase !== 'complete')
+      this.check(hand.potTotal === sum(Object.values(hand.players), (p) => p.committed), 'potTotal != sum of committed');
     if (live) {
       const p = hand.players[hand.toAct];
       this.check(p && !p.folded && seats[hand.toAct].stack > 0, 'live hand with toAct not an active seat');

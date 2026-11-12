@@ -151,8 +151,8 @@ export function validateConfig(c) {
  * @property {number} remainingMs         time left before toAct is auto-acted (0 when nobody is to act);
  *                                        may exceed turnMs while the preceding animations play
  * @property {number} turnMs              the player's full clock for this turn, for drawing the timer ring
- * @property {Object<number,{folded:boolean, allIn:boolean, streetBet:number, cards:null|[Card,Card]}>} players
- *   keyed by seat, only seats dealt into the hand. cards is null unless it is the viewer's own hand or
+ * @property {Object<number,{folded:boolean, allIn:boolean, streetBet:number, committed:number, cards:null|[Card,Card]}>} players
+ *   keyed by seat, only seats dealt into the hand. committed = chips put in over the whole hand. cards is null unless it is the viewer's own hand or
  *   the hand has been revealed.
  *
  * @typedef {{check:boolean, call:number, raise:null|{min:number, max:number}}} Legal

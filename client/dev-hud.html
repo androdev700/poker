@@ -5,31 +5,32 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>HUD Harness</title>
   <link rel="stylesheet" href="/css/style.css">
+  <script type="importmap">
+    { "imports": { "three": "/vendor/three/three.module.js" } }
+  </script>
   <style>
-    .dev-felt {
-      position: fixed;
-      inset: 0;
-      background: radial-gradient(120% 90% at 50% 45%, #13202c 0%, #090c13 75%);
-    }
+    .dev-felt { position: fixed; inset: 0; background: radial-gradient(120% 90% at 50% 45%, #13202c 0%, #090c13 75%); }
+    .dev-felt > * { position: absolute; }
     .dev-table {
-      position: absolute;
       border-radius: 50%;
       background: radial-gradient(ellipse at 50% 40%, #167a52 0%, #0e5a3c 55%, #0a4029 100%);
-      box-shadow: 0 0 0 14px #2a1a10, 0 0 0 16px #4a3020, 0 30px 80px rgba(0, 0, 0, 0.7);
+      box-shadow: 0 0 0 10px #2a1a10, 0 0 0 12px #4a3020, 0 30px 80px rgba(0, 0, 0, 0.7);
     }
-    .dev-board { position: absolute; display: flex; gap: 6px; transform: translate(-50%, -50%); }
     .dev-card {
-      width: clamp(30px, 6.5vmin, 58px);
-      aspect-ratio: 5 / 7;
-      border-radius: 6px;
+      border-radius: 4px;
       background: #f4f1ea;
       color: #111;
       display: grid;
       place-items: center;
-      font: 700 clamp(12px, 2.6vmin, 20px) / 1 system-ui, sans-serif;
-      box-shadow: 0 4px 10px rgba(0, 0, 0, 0.5);
+      font: 700 12px / 1 system-ui, sans-serif;
+      box-shadow: 0 3px 8px rgba(0, 0, 0, 0.5);
     }
     .dev-card.red { color: #c22; }
+    .dev-card.back { background: repeating-linear-gradient(45deg, #8a1f2b 0 4px, #6d1621 4px 8px); border: 2px solid #f4f1ea; }
+    .dev-pile { border-radius: 50%; background: radial-gradient(circle, #f2c66d 0 35%, #fff 37% 48%, #d9a441 50%); box-shadow: 0 2px 6px rgba(0, 0, 0, 0.6); }
+    #stage { display: none; }
+    body.scene #stage { display: block; }
+    body.scene .dev-felt { display: none; }
     .dev-tools {
       position: fixed;
       z-index: 200;
@@ -50,7 +51,8 @@
   </style>
 </head>
 <body>
-  <div class="dev-felt"><div class="dev-table" id="devTable"></div><div class="dev-board" id="devBoard"></div></div>
+  <canvas id="stage"></canvas>
+  <div class="dev-felt" id="devFelt"></div>
   <div id="hud"></div>
   <div id="actionbar"></div>
   <div id="screens"></div>
@@ -62,42 +64,220 @@
     import { createLobby } from '/js/lobby.js';
 
     const params = new URLSearchParams(location.search);
+    const SCENE = params.get('scene') === '1';
     const log = (msg) => { document.getElementById('devLog').textContent = msg; console.log('[dev]', msg); };
+    if (SCENE) document.body.classList.add('scene');
 
+    // ---- fake geometry: an ellipse fitted so every plate (placed as hud.layout() places it) fits the free box ----
+    let hud = null;
+    let ds = null;
     let youSeat = 0;
-    function geom() {
-      const W = innerWidth, H = innerHeight;
-      const portrait = H > W;
-      const cx = W / 2;
-      const cy = H * (portrait ? 0.43 : 0.45);
-      const rx = W * (portrait ? 0.36 : 0.36);
-      const ry = H * (portrait ? 0.29 : 0.3);
-      return { cx, cy, rx, ry };
-    }
-    function screenPos(seat, spot) {
-      const { cx, cy, rx, ry } = geom();
-      if (spot === 'pot') return { x: cx, y: cy - ry * 0.3 };
-      if (spot === 'board') return { x: cx, y: cy + ry * 0.02 };
-      const r = (seat - youSeat + 6) % 6;
-      const a = Math.PI / 2 + r * (Math.PI * 2 / 6);
-      const k = spot === 'bet' ? 0.58 : 1.04;
-      return { x: cx + rx * k * Math.cos(a), y: cy + ry * k * Math.sin(a) };
-    }
-    function drawTable(board) {
-      const { cx, cy, rx, ry } = geom();
-      Object.assign(document.getElementById('devTable').style, { left: `${cx - rx * 0.86}px`, top: `${cy - ry * 0.86}px`, width: `${rx * 1.72}px`, height: `${ry * 1.72}px` });
-      const b = document.getElementById('devBoard');
-      const p = screenPos(null, 'board');
-      Object.assign(b.style, { left: `${p.x}px`, top: `${p.y}px` });
-      b.replaceChildren(...(board || []).map((c) => {
-        const d = document.createElement('div');
-        const suit = { s: '♠', h: '♥', d: '♦', c: '♣' }[c[1]];
-        d.className = 'dev-card' + ('hd'.includes(c[1]) ? ' red' : '');
-        d.textContent = (c[0] === 'T' ? '10' : c[0]) + suit;
-        return d;
-      }));
+    let geomKey = '';
+    let G = null;
+    const viewOf = (seat) => (((seat - youSeat) % 6) + 6) % 6;
+
+    function ellipsePoint(g, t) {
+      const c = Math.cos(t);
+      const s = Math.sin(t);
+      let ux = c / g.rx;
+      let uy = s / g.ry;
+      const n = Math.hypot(ux, uy);
+      return { x: g.cx + g.rx * c, y: g.cy + g.ry * s, ux: ux / n, uy: uy / n };
     }
 
+    function geom() {
+      const W = document.documentElement.clientWidth;
+      const H = document.documentElement.clientHeight;
+      const m = hud.metrics();
+      const key = `${W}x${H}:${JSON.stringify(m)}`;
+      if (key === geomKey) return G;
+      const portrait = W / H < 1.05;
+      const free = { l: m.left, t: m.top, r: W - m.right, b: H - m.bottom };
+      const T = (portrait ? [90, 148, 212, 270, 328, 32] : [90, 150, 210, 270, 330, 30]).map((d) => (d * Math.PI) / 180);
+      const dims = (v) => (v === 0 ? m.plates.hero : v === 3 ? m.plates.top : m.plates.side);
+      const g = { cx: (free.l + free.r) / 2, cy: (free.t + free.b) / 2, rx: (free.r - free.l) / 2, ry: (free.b - free.t) / 2, portrait, T, free };
+      const anchor = (v) => {
+        if (v === 0 && !portrait) {
+          const t = Math.PI / 2 + 0.32;
+          return ellipsePoint(g, t);
+        }
+        return ellipsePoint(g, T[v]);
+      };
+      for (let k = 0; k < 60; k++) {
+        let L = Infinity, R = -Infinity, Tp = Infinity, B = -Infinity;
+        for (let v = 0; v < 6; v++) {
+          const d = dims(v);
+          const a = anchor(v);
+          if (!d) {
+            B = Math.max(B, a.y + 8);
+            continue;
+          }
+          const o = (d.w / 2) * Math.abs(a.ux) + (d.h / 2) * Math.abs(a.uy);
+          const cx = a.x + a.ux * o;
+          const cy = a.y + a.uy * o;
+          L = Math.min(L, cx - d.w / 2);
+          R = Math.max(R, cx + d.w / 2);
+          Tp = Math.min(Tp, cy - d.h / 2);
+          B = Math.max(B, cy + d.h / 2);
+        }
+        const ox = Math.max(free.l - L, R - free.r);
+        const oT = free.t - Tp;
+        const oB = B - free.b;
+        if (Math.abs(ox) < 0.5 && Math.abs(oT) < 0.5 && Math.abs(oB) < 0.5) break;
+        g.rx = Math.max(40, g.rx - ox * 0.7);
+        g.ry = Math.max(40, g.ry - ((oT + oB) / 2) * 0.7);
+        g.cy += ((oT - oB) / 2) * 0.7;
+        // The real camera scales the table uniformly, so a short screen shrinks it rather than flattening it.
+        if (portrait) g.rx = Math.min(g.rx, g.ry / 1.35);
+        else {
+          g.rx = Math.min(g.rx, g.ry / 0.48);
+          g.ry = Math.min(g.ry, g.rx * 0.62);
+        }
+      }
+      g.anchor = anchor;
+      // World proportions from scene/layout.js: ux px per world unit across, uy down the (foreshortened) depth.
+      const RX = portrait ? 2.7 : 5.1;
+      const RZ = portrait ? 5.0 : 3.05;
+      g.RX = RX;
+      g.RZ = RZ;
+      g.ux = g.rx / RX;
+      g.uy = g.ry / RZ;
+      g.holeInset = portrait ? [0.72, 1.1, 1.1, 0.72, 1.1, 1.1] : [0.78, 0.78, 0.78, 0.78, 0.78, 0.78];
+      g.betInset = portrait ? [1.12, 1.9, 1.9, 1.6, 1.9, 1.9] : [1.12, 1.75, 1.55, 1.25, 1.55, 1.75];
+      const bs = portrait ? 1.08 : 1.22;
+      g.cw = 0.62 * bs * g.ux;
+      g.ch = 0.87 * bs * g.uy;
+      g.gap = 0.09 * bs * g.ux;
+      const bw = g.cw * 5 + g.gap * 4;
+      g.board = { l: g.cx - bw / 2, t: g.cy - g.ch / 2, r: g.cx + bw / 2, b: g.cy + g.ch / 2 };
+      g.pileR = 0.3 * g.ux;
+      g.pileY = g.board.t - (portrait ? 0.5 : 0.55) * g.uy;
+      g.pileSpacing = (portrait ? 1.05 : 0.95) * g.ux;
+      const hs = portrait ? 1.45 : 1.38;
+      const hz = RZ - (0.72 + 0.32);
+      const hw = 0.62 * hs * 1.56 * g.ux;
+      const hh = 0.87 * hs * 1.5 * g.uy;
+      g.hero = { l: g.cx - hw / 2, t: g.cy + hz * g.uy - hh / 2, r: g.cx + hw / 2, b: g.cy + hz * g.uy + hh / 2 };
+      geomKey = key;
+      G = g;
+      return g;
+    }
+
+    function potPiles(n) {
+      const g = geom();
+      const sp = g.pileSpacing;
+      return Array.from({ length: n }, (_, i) => {
+        const x = g.cx + (i - (n - 1) / 2) * sp;
+        return { kind: 'potPile', l: x - g.pileR, t: g.pileY - g.pileR, r: x + g.pileR, b: g.pileY + g.pileR };
+      });
+    }
+
+    function inward(g, v, inset) {
+      const t = g.T[v];
+      let nx = Math.cos(t) / g.RX;
+      let nz = Math.sin(t) / g.RZ;
+      const n = Math.hypot(nx, nz);
+      return { x: g.cx + (g.RX * Math.cos(t) - (nx / n) * inset) * g.ux, y: g.cy + (g.RZ * Math.sin(t) - (nz / n) * inset) * g.uy };
+    }
+
+    function holeRect(seat) {
+      const g = geom();
+      const v = viewOf(seat);
+      if (v === 0) return { ...g.hero };
+      const { x, y } = inward(g, v, g.holeInset[v]);
+      const p = ds?.hand?.players?.[seat];
+      const k = (p?.cards ? (g.portrait ? 1.05 : 1.12) : g.portrait ? 0.88 : 0.92) / (g.portrait ? 1.08 : 1.22);
+      const w = g.cw * k * (p?.cards ? 1.56 : 1.34);
+      const h = g.ch * k;
+      return { l: x - w / 2, t: y - h / 2, r: x + w / 2, b: y + h / 2 };
+    }
+
+    function betRect(seat) {
+      const g = geom();
+      const v = viewOf(seat);
+      let { x, y } = inward(g, v, g.betInset[v]);
+      if (v === 0) x += (g.portrait ? 1.3 : 1.6) * g.ux;
+      const r = g.pileR * 0.8;
+      return { l: x - r, t: y - r, r: x + r, b: y + r };
+    }
+
+    function fakeScreenPos(seat, spot, opts) {
+      if (!hud) return null;
+      const g = geom();
+      if (spot === 'plate') {
+        const v = viewOf(seat);
+        return g.anchor(v);
+      }
+      if (spot === 'board') return { x: g.cx, y: g.cy, ...g.board };
+      if (spot === 'hero') return { ...g.hero };
+      if (spot === 'pot') {
+        const n = Math.max(1, opts?.pots || 1);
+        if (g.portrait) {
+          const side = hud.metrics().plates.side.w;
+          return { x: g.cx, y: g.board.b + 8, align: 'below-board', maxW: g.free.r - g.free.l - 2 * side - 12 };
+        }
+        const piles = potPiles(n);
+        const x = piles[0].l - 8;
+        const hole = holeRect((youSeat + 2) % 6);
+        return { x, y: g.pileY, align: 'left-of-chips', maxW: x - hole.r - 8 };
+      }
+      return null;
+    }
+
+    function fakeScreenRects() {
+      if (!hud || !ds?.hand) return [];
+      const g = geom();
+      const out = [{ kind: 'board', l: g.board.l, t: g.board.t, r: g.board.r, b: g.board.b }];
+      const h = ds.hand;
+      out.push(...potPiles((h.pots || []).filter((p) => p.amount > 0).length).map((r) => r));
+      for (const [k, p] of Object.entries(h.players || {})) {
+        const seat = Number(k);
+        if (!p || (p.folded && seat !== youSeat)) continue;
+        out.push({ kind: 'hole', seat, ...holeRect(seat) });
+        if (p.streetBet > 0) out.push({ kind: 'betPile', seat, ...betRect(seat) });
+      }
+      return out.filter((r) => r.kind !== 'potPile' || (h.pots || []).some((p) => p.amount > 0));
+    }
+
+    function drawFelt() {
+      const felt = document.getElementById('devFelt');
+      if (SCENE || !hud) return;
+      const g = geom();
+      const kids = [];
+      const box = (cls, r, text) => {
+        const d = document.createElement('div');
+        d.className = cls;
+        Object.assign(d.style, { left: `${r.l}px`, top: `${r.t}px`, width: `${r.r - r.l}px`, height: `${r.b - r.t}px` });
+        if (text) d.textContent = text;
+        kids.push(d);
+        return d;
+      };
+      box('dev-table', { l: g.cx - g.rx, t: g.cy - g.ry, r: g.cx + g.rx, b: g.cy + g.ry });
+      const glyph = (c) => (c[0] === 'T' ? '10' : c[0]) + { s: '♠', h: '♥', d: '♦', c: '♣' }[c[1]];
+      const card = (r, code) => {
+        const d = box('dev-card' + (code ? ('hd'.includes(code[1]) ? ' red' : '') : ' back'), r, code ? glyph(code) : '');
+        d.style.fontSize = `${Math.max(9, (r.r - r.l) * 0.36)}px`;
+      };
+      const h = ds?.hand;
+      (h?.board || []).forEach((c, i) => {
+        const l = g.board.l + i * (g.cw + g.gap);
+        card({ l, t: g.board.t, r: l + g.cw, b: g.board.b }, c);
+      });
+      for (const r of fakeScreenRects()) {
+        if (r.kind === 'potPile' || r.kind === 'betPile') box('dev-pile', r);
+        if (r.kind === 'hole') {
+          const p = h.players[r.seat];
+          const w = (r.r - r.l) / 1.6;
+          for (let i = 0; i < 2; i++) {
+            const l = r.l + i * w * 0.6;
+            card({ l, t: r.t, r: l + w, b: r.b }, p.cards?.[i] || null);
+          }
+        }
+      }
+      felt.replaceChildren(...kids);
+    }
+
+    // ---- views ----
     const CFG = { buyIn: 1000, smallBlind: 5, bigBlind: 10, turnSeconds: 30 };
     const share = { lan: ['http://192.168.1.42:3000', 'http://10.0.0.7:3000'], tunnel: 'https://quiet-river-1234.trycloudflare.com' };
     const seat = (i, name, stack, extra = {}) => ({ seat: i, name, stack, busted: false, connected: true, away: false, isHost: false, ...extra });
@@ -121,18 +301,17 @@
         seat(5, 'Eli', 1200, { connected: false }),
       ];
       const players = {
-        0: { folded: false, allIn: false, streetBet: 50, cards: ['Qs', 'Qh'] },
-        1: { folded: false, allIn: false, streetBet: 200, cards: null },
-        2: { folded: true, allIn: false, streetBet: 0, cards: null },
-        3: { folded: false, allIn: true, streetBet: 150, cards: null },
-        4: { folded: false, allIn: false, streetBet: 0, cards: null },
-        5: { folded: false, allIn: false, streetBet: 0, cards: null },
+        0: { folded: false, allIn: false, streetBet: 50, committed: 150, cards: ['Qs', 'Qh'] },
+        1: { folded: false, allIn: false, streetBet: 200, committed: 300, cards: null },
+        2: { folded: true, allIn: false, streetBet: 0, committed: 20, cards: null },
+        3: { folded: false, allIn: true, streetBet: 150, committed: 250, cards: null },
+        4: { folded: false, allIn: false, streetBet: 0, committed: 100, cards: null },
+        5: { folded: false, allIn: false, streetBet: 0, committed: 100, cards: null },
       };
       let currentBet = 200;
       let legal = { check: false, call: 150, raise: { min: 350, max: 3000 } };
       if (variant === 'bet') {
         for (const p of Object.values(players)) p.streetBet = 0;
-        players[3].streetBet = 0;
         currentBet = 0;
         legal = { check: true, call: 0, raise: { min: 10, max: 2950 } };
       } else if (variant === 'short') {
@@ -152,10 +331,98 @@
       };
     }
 
-    let hud = null;
-    let ds = null;
+    function worstView() {
+      const cfg = { buyIn: 1_000_000, smallBlind: 5000, bigBlind: 10000, turnSeconds: 30 };
+      const seats = [
+        seat(0, 'Samantha Rodrigu', 1_250_000, { isHost: true }),
+        seat(1, 'Alexandria Petro', 12_500),
+        seat(2, 'Bartholomew Kent', 487_250, { connected: false }),
+        seat(3, 'Chen Wei-Long Jr', 0),
+        seat(4, 'Dana Okonkwo-Lee', 96_400, { away: true }),
+        seat(5, 'Maximilian Ostro', 250_000),
+      ];
+      const players = {
+        0: { folded: false, allIn: false, streetBet: 125_000, committed: 1_125_000, cards: ['Kc', 'Kd'] },
+        1: { folded: false, allIn: false, streetBet: 250_000, committed: 987_500, cards: null },
+        2: { folded: false, allIn: false, streetBet: 0, committed: 210_000, cards: null },
+        3: { folded: false, allIn: true, streetBet: 60_000, committed: 860_000, cards: null },
+        4: { folded: false, allIn: false, streetBet: 0, committed: 210_000, cards: null },
+        5: { folded: false, allIn: false, streetBet: 125_000, committed: 335_000, cards: null },
+      };
+      const pots = [{ amount: 860_000 }, { amount: 1_400_000 }, { amount: 1_210_000 }];
+      const potTotal = pots.reduce((s, p) => s + p.amount, 0) + Object.values(players).reduce((s, p) => s + p.streetBet, 0);
+      return {
+        room: { code: 'K7QX', status: 'playing', hostId: 'p0', config: cfg, share },
+        seats,
+        hand: { handId: 1284, phase: 'turn', button: 2, sbSeat: 3, bbSeat: 4, board: ['Ah', 'Kd', '7c', 'Ts'], pots, potTotal, currentBet: 250_000, toAct: 0, turnId: 42, remainingMs: 22000, turnMs: 30000, players },
+        you: { playerId: 'p0', seat: 0, isHost: true, legal: { check: false, call: 125_000, raise: { min: 375_000, max: 1_375_000 } } },
+      };
+    }
+    const WORST_BUBBLES = { 0: 'BB', 1: 'Raise', 5: 'Call', 2: 'Check' };
+
+    function complete(v, { lobby = true } = {}) {
+      v.hand.phase = 'complete';
+      v.hand.toAct = null;
+      v.you.legal = null;
+      v.hand.board = ['Ah', 'Kd', '7c', '2s', 'Kh'];
+      v.hand.pots = [];
+      v.hand.potTotal = 0;
+      for (const p of Object.values(v.hand.players)) p.streetBet = 0;
+      if (lobby) v.room.status = 'lobby';
+      return v;
+    }
+
+    function showdown2({ host = true } = {}) {
+      const v = complete(handView());
+      v.hand.players[1].cards = ['Ks', 'As'];
+      for (const s of [2, 3, 4, 5]) v.hand.players[s].folded = true;
+      v.hand.players[3].allIn = false;
+      v.seats[1].stack += 1260;
+      if (!host) {
+        v.you = { ...v.you, playerId: 'p0', isHost: false };
+        v.seats[0].isHost = false;
+      }
+      return [v, {
+        handNames: { 0: 'Two Pair, Kings and Queens', 1: 'Full House, Kings over Aces' },
+        winners: { 1: 1260 },
+        results: { pots: [{ index: 0, amount: 1260, uncontested: false, winners: [{ seat: 1, amount: 1260 }] }] },
+        banner: 'Alice wins 1,260 with Full House, Kings over Aces',
+      }];
+    }
+
+    function showdownWorst() {
+      const v = complete(worstView());
+      const cards = { 0: ['Kc', 'Kd'], 1: ['Ks', 'As'], 2: ['Jh', 'Td'], 3: ['Ac', 'Qd'], 4: ['9h', '9s'], 5: ['Tc', 'Th'] };
+      for (const [s, c] of Object.entries(cards)) {
+        v.hand.players[s].cards = c;
+        v.hand.players[s].allIn = false;
+      }
+      v.seats[2].connected = true;
+      v.seats[4].away = false;
+      return [v, {
+        handNames: {
+          0: 'Four of a Kind, Kings',
+          1: 'Full House, Kings over Aces',
+          2: 'Straight, Ace high',
+          3: 'Two Pair, Aces and Kings',
+          4: 'Three of a Kind, Nines',
+          5: 'Three of a Kind, Tens',
+        },
+        winners: { 0: 1_830_000, 3: 430_000, 1: 1_280_000 },
+        results: { pots: [
+          { index: 0, amount: 860_000, uncontested: false, winners: [{ seat: 0, amount: 430_000 }, { seat: 3, amount: 430_000 }] },
+          { index: 1, amount: 1_400_000, uncontested: false, winners: [{ seat: 0, amount: 1_400_000 }] },
+          { index: 2, amount: 1_280_000, uncontested: false, winners: [{ seat: 1, amount: 1_280_000 }] },
+        ] },
+        banner: 'Alexandria Petro wins side pot 1,280,000',
+      }];
+    }
+
+    // ---- harness plumbing ----
     let raf = 0;
     let muted = false;
+    let connected = true;
+    let stage = null;
     const lobby = createLobby(document.getElementById('screens'), {
       onCreate: (a) => log(`onCreate ${JSON.stringify(a)}`),
       onJoin: (a) => log(`onJoin ${JSON.stringify(a)}`),
@@ -163,10 +430,18 @@
       onCloseTable: () => log('onCloseTable'),
       onLeave: () => log('onLeave'),
     });
-    const bar = createActionBar(document.getElementById('actionbar'), {
-      onAction: (a) => log(`onAction ${JSON.stringify(a)}`),
-    });
+    const barEl = document.getElementById('actionbar');
+    const bar = createActionBar(barEl, { onAction: (a) => log(`onAction ${JSON.stringify(a)}`) });
+    function reportBar() {
+      if (!hud) return;
+      if (barEl.classList.contains('is-hidden')) return hud.setBar(null);
+      const l = barEl.offsetLeft;
+      const t = barEl.offsetTop;
+      hud.setBar({ l, t, r: l + barEl.offsetWidth, b: t + barEl.offsetHeight });
+    }
+    new ResizeObserver(reportBar).observe(barEl);
 
+    const screenPos = (...a) => (stage ? stage.screenPos(...a) : fakeScreenPos(...a));
     function freshHud() {
       hud?.destroy();
       hud = createHud(document.getElementById('hud'), {
@@ -174,8 +449,12 @@
         onMuteToggle: () => { muted = !muted; log(`muted=${muted}`); },
         onCloseTable: () => log('hud onCloseTable'),
         onStart: () => log('hud onStart'),
+        onBack: () => log('hud onBack'),
+        onSizeClass: () => stage?.setInsets?.(hud.metrics()),
         isMuted: () => muted,
+        isConnected: () => connected,
       });
+      stage?.setInsets?.(hud.metrics());
     }
 
     function loop() {
@@ -189,54 +468,61 @@
     }
 
     function inHand(view, extras = {}) {
-      ds = { ...view, turnEndsAt: null, bubbles: {}, handNames: null, winners: null, banner: null, ...extras };
+      ds = { ...view, turnEndsAt: null, bubbles: {}, handNames: {}, winners: {}, results: null, banner: null, ...extras };
       youSeat = view.you.seat;
-      freshHud();
-      drawTable(view.hand?.board);
+      stage?.setPerspective?.(youSeat);
+      stage?.sync?.(ds);
       hud.render(ds);
+      drawFelt();
       hud.layout();
       const me = view.hand?.players?.[view.you.seat];
       if (view.you.legal) {
         bar.show({ legal: view.you.legal, hand: view.hand, stack: view.seats[view.you.seat].stack, streetBet: me?.streetBet ?? 0, bigBlind: view.room.config.bigBlind });
       }
+      reportBar();
     }
 
-    const BUBBLES = { 1: 'Raise to 200', 2: 'Fold', 3: 'All-in 150', 4: 'Call 200', 5: 'Check' };
-    const STATES = {
-      home: () => lobby.showHome({ name: 'Sam' }),
-      'home-join': () => lobby.showHome({ code: 'k7qx', name: 'Sam' }),
-      'home-error': () => lobby.showHome({ code: 'ZZZZ', name: 'Sam', error: 'No table with code ZZZZ' }),
-      connecting: () => lobby.showConnecting('Joining table K7QX…'),
-      'waiting-host': () => { lobby.showWaiting(lobbyView({ host: true })); },
-      'waiting-guest': () => { lobby.showWaiting(lobbyView({ host: false })); },
-      'waiting-solo': () => { const v = lobbyView({ host: true }); v.seats = [v.seats[0], null, null, null, null, null]; lobby.showWaiting(v); },
+    const BUBBLES = { 1: 'Raise', 2: 'Fold', 3: 'Call', 4: 'Call', 5: 'Check', 0: 'SB' };
+    const HUD_STATES = {
       turn: () => inHand(handView(), { turnEndsAt: performance.now() + 22000, bubbles: BUBBLES }),
-      'turn-bet': () => inHand(handView({ variant: 'bet' }), { turnEndsAt: performance.now() + 9000, bubbles: { 5: 'Check' } }),
-      'turn-short': () => inHand(handView({ variant: 'short' }), { turnEndsAt: performance.now() + 6000, bubbles: BUBBLES }),
-      'turn-allin-only': () => inHand(handView({ variant: 'allin-only' }), { turnEndsAt: performance.now() + 20000, bubbles: BUBBLES }),
-      'not-turn': () => inHand(handView({ toAct: 1 }), { turnEndsAt: performance.now() + 14000, bubbles: { 2: 'Fold', 3: 'All-in 150', 5: 'Check' } }),
-      showdown: () => {
-        const v = handView({ phase: 'complete' });
-        v.hand.toAct = null;
-        v.you.legal = null;
-        v.hand.board = ['Ah', 'Kd', '7c', '2s', 'Kh'];
-        for (const p of Object.values(v.hand.players)) p.streetBet = 0;
-        v.hand.pots = [{ amount: 1260 }];
+      'raise-open': () => {
+        inHand(handView(), { turnEndsAt: performance.now() + 22000, bubbles: BUBBLES });
+        barEl.querySelector('.act-raise')?.click();
+        reportBar();
+      },
+      'not-turn': () => inHand(handView({ toAct: 1 }), { turnEndsAt: performance.now() + 14000, bubbles: { 2: 'Fold', 3: 'Call', 5: 'Check', 0: 'SB' } }),
+      'worst-mid': () => inHand(worstView(), { turnEndsAt: performance.now() + 4000, bubbles: WORST_BUBBLES }),
+      'showdown-2': () => inHand(...showdown2()),
+      'showdown-worst': () => inHand(...showdownWorst()),
+      uncontested: () => {
+        const v = complete(handView());
+        for (const s of [0, 2, 3, 4, 5]) v.hand.players[s].folded = true;
+        v.hand.players[3].allIn = false;
+        v.hand.board = ['Ah', 'Kd', '7c'];
         inHand(v, {
-          handNames: { 0: 'Two Pair, Kings and Queens', 1: 'Full House, Kings over Aces', 3: 'Two Pair, Aces and Kings', 4: 'Pair of Kings', 5: 'Pair of Kings' },
           winners: { 1: 1260 },
-          banner: 'Alice wins 1,260 with a Full House',
+          results: { pots: [{ index: 0, amount: 1260, uncontested: true, winners: [{ seat: 1, amount: 1260 }] }] },
+          banner: 'Alice wins 1,260',
         });
       },
+      'showdown-guest': () => inHand(...showdown2({ host: false })),
+      'showdown-collapsed': () => {
+        inHand(...showdownWorst());
+        document.querySelector('.results-head')?.click();
+      },
+      'resume-complete': () => {
+        const v = complete(handView());
+        v.hand.players[1].cards = ['Ks', 'As'];
+        v.hand.players[3].cards = ['Ac', 'Qd'];
+        for (const s of [2, 4, 5]) v.hand.players[s].folded = true;
+        inHand(v);
+      },
       'between-hands': () => {
-        const v = handView();
-        v.room.status = 'lobby';
-        v.hand.phase = 'complete';
-        v.hand.toAct = null;
+        const v = complete(handView());
+        v.hand.board = ['Ah', 'Kd', '7c'];
         v.seats[3].busted = true;
         v.seats[3].stack = 0;
-        v.you.legal = null;
-        inHand(v, { banner: 'Waiting for players…' });
+        inHand(v);
       },
       busted: () => {
         const v = handView({ toAct: 1 });
@@ -247,6 +533,24 @@
         delete v.hand.players[0];
         inHand(v, { turnEndsAt: performance.now() + 18000, bubbles: { 2: 'Fold' } });
       },
+    };
+    const STATES = {
+      ...HUD_STATES,
+      'turn-bet': () => inHand(handView({ variant: 'bet' }), { turnEndsAt: performance.now() + 9000, bubbles: { 5: 'Check' } }),
+      'turn-short': () => inHand(handView({ variant: 'short' }), { turnEndsAt: performance.now() + 6000, bubbles: BUBBLES }),
+      'turn-allin-only': () => inHand(handView({ variant: 'allin-only' }), { turnEndsAt: performance.now() + 20000, bubbles: BUBBLES }),
+      away: () => {
+        const v = handView({ toAct: 1 });
+        v.seats[0].away = true;
+        inHand(v, { turnEndsAt: performance.now() + 14000, bubbles: { 2: 'Fold' } });
+      },
+      home: () => lobby.showHome({ name: 'Sam' }),
+      'home-join': () => lobby.showHome({ code: 'k7qx', name: 'Sam' }),
+      'home-error': () => lobby.showHome({ code: 'ZZZZ', name: 'Sam', error: 'No table with code ZZZZ' }),
+      connecting: () => lobby.showConnecting('Joining table K7QX…'),
+      'waiting-host': () => lobby.showWaiting(lobbyView({ host: true })),
+      'waiting-guest': () => lobby.showWaiting(lobbyView({ host: false })),
+      'waiting-solo': () => { const v = lobbyView({ host: true }); v.seats = [v.seats[0], null, null, null, null, null]; lobby.showWaiting(v); },
       scoreboard: () => lobby.showScoreboard([
         { name: 'Alice', stack: 3390, net: 2390, handsWon: 9 },
         { name: 'Sam', stack: 1500, net: 500, handsWon: 6 },
@@ -262,19 +566,100 @@
       bar.hide();
       lobby.hide();
       freshHud();
-      drawTable(null);
+      stage?.sync?.(null);
+      document.getElementById('devFelt').replaceChildren();
       document.getElementById('devLog').textContent = '';
       STATES[name]();
-      const keep = ['clean', 'still'].filter((k) => params.has(k)).map((k) => `&${k}`).join('');
+      const keep = ['clean', 'still', 'scene'].filter((k) => params.has(k)).map((k) => `&${k}=${params.get(k) || 1}`).join('');
       history.replaceState(null, '', `?state=${name}${keep}`);
     }
 
+    // ---- overlap check (hud-design.md) ----
+    function hudCheck({ margin = 4, state = new URLSearchParams(location.search).get('state') } = {}) {
+      const vw = document.documentElement.clientWidth, vh = document.documentElement.clientHeight;
+      const SEL = {
+        plate: '.plate', hero: '.hero-strip', pot: '.hud-pot', results: '.results',
+        info: '.hud-info', tools: '.hud-tools', bar: '.actionbar:not(.is-hidden)', status: '.dock-status',
+      };
+      const shown = (el) => {
+        for (let n = el; n && n.nodeType === 1; n = n.parentElement) {
+          const cs = getComputedStyle(n);
+          if (n.hidden || cs.display === 'none' || +cs.opacity < 0.05) return false;
+        }
+        return getComputedStyle(el).visibility !== 'hidden';
+      };
+      const items = [];
+      for (const [kind, sel] of Object.entries(SEL)) {
+        document.querySelectorAll(sel).forEach((el, i) => {
+          if (!shown(el)) return;
+          const r = el.getBoundingClientRect();
+          if (r.width < 1 || r.height < 1) return;
+          items.push({ kind, id: `${kind}#${i} ${(el.textContent || '').trim().slice(0, 24)}`, el, l: r.left, t: r.top, r: r.right, b: r.bottom });
+        });
+      }
+      const st = window.dev?.stage;
+      const three = (st?.screenRects?.() || []).map((q) => ({ ...q, id: `3d:${q.kind}${q.seat ?? ''}` }));
+      const hit = (a, b) => Math.min(a.r, b.r) - Math.max(a.l, b.l) > 0.5 && Math.min(a.b, b.b) - Math.max(a.t, b.t) > 0.5;
+      const OVERLAY = new Set(['results', 'bar', 'hero', 'status']);
+      const fails = [];
+      for (const a of items) {
+        if (a.l < margin - 0.5 || a.t < margin - 0.5 || a.r > vw - margin + 0.5 || a.b > vh - margin + 0.5) {
+          if (!OVERLAY.has(a.kind) || a.l < -0.5 || a.t < -0.5 || a.r > vw + 0.5 || a.b > vh + 0.5)
+            fails.push({ type: 'offscreen', a: a.id, rect: [a.l, a.t, a.r, a.b].map(Math.round).join(',') });
+        }
+        if (a.kind === 'plate') a.el.querySelectorAll('*').forEach((c) => {
+          const r = c.getBoundingClientRect();
+          if (r.width && (r.left < a.l - 1 || r.right > a.r + 1 || r.top < a.t - 1 || r.bottom > a.b + 1)) fails.push({ type: 'spills', a: a.id, b: String(c.className?.baseVal ?? c.className) });
+        });
+      }
+      for (let i = 0; i < items.length; i++) for (let j = i + 1; j < items.length; j++) {
+        const a = items[i], b = items[j];
+        if (a.el.contains(b.el) || b.el.contains(a.el)) continue;
+        if (hit(a, b)) fails.push({ type: 'overlap', a: a.id, b: b.id });
+      }
+      for (const a of items) for (const q of three) {
+        if (OVERLAY.has(a.kind) && q.kind !== 'board') continue; // overlays may cover the felt, never the board
+        if (hit(a, q)) fails.push({ type: 'covers-3d', a: a.id, b: q.id });
+      }
+      // Hiding is not overlap resolution: the pot is never hidden while it holds chips, and a plate only where it
+      // really sits beneath the results sheet or the open raise panel.
+      const coveredPots = [...document.querySelectorAll('.hud-pot.is-covered')].filter((el) => !el.hidden);
+      const coveredPlates = [...document.querySelectorAll('.plate.is-covered')].filter((el) => !el.hidden);
+      if (coveredPots.length && (window.dev?.ds?.hand?.potTotal ?? 0) > 0) fails.push({ type: 'covered-pot', a: 'pot' });
+      const sheets = items.filter((i) => i.kind === 'results' || (i.kind === 'bar' && state === 'raise-open'));
+      for (const el of coveredPlates) {
+        const r = el.getBoundingClientRect();
+        if (!sheets.some((s) => hit(s, { l: r.left, t: r.top, r: r.right, b: r.bottom }))) fails.push({ type: 'covered-plate', a: `plate#${el.dataset.seat}` });
+      }
+      return { ok: fails.length === 0, viewport: `${vw}x${vh}`, checked: items.length, three: three.length, covered: { pot: coveredPots.length, plates: coveredPlates.length }, fails };
+    }
+    // rAF stalls while the preview pane is hidden, so frames fall back to a timeout; finite animations and
+    // transitions are fast-forwarded so the check judges where things come to rest.
+    const frame = () => new Promise((r) => { requestAnimationFrame(() => r()); setTimeout(r, 50); });
+    async function settle() {
+      await frame();
+      await frame();
+      for (const a of document.getAnimations()) {
+        if (Number.isFinite(a.effect?.getComputedTiming?.().endTime)) a.finish();
+      }
+      await frame();
+    }
+    async function hudSweep(states = dev.states) {
+      const out = {};
+      for (const s of states) {
+        dev.go(s);
+        await settle();
+        out[s] = hudCheck({ state: s });
+      }
+      return out;
+    }
+
     const tools = document.getElementById('devTools');
-    const toggle = document.createElement('button');
-    toggle.className = 'dev-toggle';
-    toggle.textContent = 'dev';
-    toggle.onclick = () => tools.classList.toggle('collapsed');
-    tools.append(toggle);
+    const toggleBtn = document.createElement('button');
+    toggleBtn.className = 'dev-toggle';
+    toggleBtn.textContent = 'dev';
+    toggleBtn.onclick = () => tools.classList.toggle('collapsed');
+    tools.append(toggleBtn);
     for (const name of Object.keys(STATES)) {
       const b = document.createElement('button');
       b.textContent = name;
@@ -289,8 +674,41 @@
     if (params.has('clean')) tools.hidden = true;
     else tools.classList.add('collapsed');
 
-    addEventListener('resize', () => { drawTable(ds?.hand?.board); hud?.layout(); });
-    window.dev = { go, get ds() { return ds; }, bar, lobby, get hud() { return hud; } };
+    if (SCENE) {
+      try {
+        const { createStage } = await import('/js/scene/stage.js');
+        stage = createStage(document.getElementById('stage'));
+        stage.onLayout?.(() => hud?.layout());
+        if (!stage.setInsets || !stage.screenRects) console.warn('[dev] stage lacks setInsets/screenRects; overlap check runs without 3D rects');
+      } catch (err) {
+        console.error('[dev] scene mode failed, falling back to fake geometry', err);
+        stage = null;
+        document.body.classList.remove('scene');
+      }
+    }
+
+    addEventListener('resize', () => {
+      if (!hud) return;
+      stage?.setInsets?.(hud.metrics());
+      reportBar();
+      hud.layout();
+      drawFelt();
+    });
+    window.dev = {
+      go,
+      get ds() { return ds; },
+      get stage() { return stage || { screenRects: fakeScreenRects, screenPos: fakeScreenPos }; },
+      get hud() { return hud; },
+      states: Object.keys(HUD_STATES),
+      setConnected(v) {
+        connected = !!v;
+        hud?.refresh();
+      },
+      bar,
+      lobby,
+    };
+    window.hudCheck = hudCheck;
+    window.hudSweep = hudSweep;
     go(STATES[params.get('state')] ? params.get('state') : 'turn');
     loop();
   </script>

@@ -4,7 +4,7 @@ import { Tweener, ease, lerp } from './tween.js';
 import {
   CARD,
   SEATS,
-  makeLayout,
+  layoutChoices,
   viewIndex,
   plateSpot,
   betSpot,
@@ -18,10 +18,24 @@ import {
 } from './layout.js';
 import { createTable } from './table.js';
 import { createCardKit, Card } from './cards.js';
-import { createChipKit, Pile } from './chips.js';
+import { createChipKit, Pile, CHIP_R, CHIP_H } from './chips.js';
 
 const FLIP_DOWN = Math.PI;
 const HIGHLIGHT_LIFT = 0.08;
+const RAIL_Y = 0.3;
+const FIT_MARGIN = 6;
+const POT_GAP = 8;
+const POT_PILL_H = 28;
+const POT_MIN_W = 120;
+// The largest pile chips.js builds: two rows of three stacks, ten chips high.
+const PILE_HW = 2 * CHIP_R + 0.018 + CHIP_R + 0.01;
+const PILE_HD = (2 * CHIP_R + 0.018) / 2 + CHIP_R + 0.01;
+const PILE_H = 10 * CHIP_H;
+const BUTTON_R = 0.22;
+
+const emptyRect = () => ({ l: Infinity, t: Infinity, r: -Infinity, b: -Infinity });
+const isRect = (r) => r.l < r.r && r.t < r.b;
+const hits = (a, b) => a.l < b.r && b.l < a.r && a.t < b.b && b.t < a.b;
 
 function makeButtonMesh() {
   const S = 256;
@@ -125,6 +139,14 @@ export function createStage(canvas) {
   let disposed = false;
   const layoutCbs = new Set();
   const tmp = new THREE.Vector3();
+  const tmp2 = new THREE.Vector3();
+  const scl = new THREE.Vector3();
+  const m4 = new THREE.Matrix4();
+  const quat = new THREE.Quaternion();
+  const eul = new THREE.Euler(0, 0, 0, 'YXZ');
+  let insets = null;
+  let insetKey = '';
+  let pendingRebuild = false;
 
   const v = (seat) => viewIndex(seat, st.mySeat);
   const isHero = (seat) => seat === st.heroSeat && v(seat) === 0;
@@ -206,6 +228,7 @@ export function createStage(canvas) {
   }
 
   function targetTone(card) {
+    if (card.folded) return -1;
     if (!st.highlight) return 0;
     return card.faceUp && st.highlight.has(card.code) ? 1 : -1;
   }
@@ -311,7 +334,9 @@ export function createStage(canvas) {
     for (const key of Object.keys(players)) {
       const seat = Number(key);
       const p = players[key];
-      if (!p || p.folded) continue;
+      if (!p) continue;
+      // Your own folded hand stays on the table, greyed out, so you can still see what you let go.
+      if (p.folded && !(seat === st.heroSeat && p.cards)) continue;
       live.add(seat);
       let cards = st.holes.get(seat);
       if (!cards) {
@@ -321,6 +346,7 @@ export function createStage(canvas) {
       cards.forEach((c, i) => {
         c.setCode(p.cards ? p.cards[i] : null);
         c.faceUp = !!p.cards;
+        c.folded = !!p.folded;
       });
     }
     for (const seat of [...st.holes.keys()]) if (!live.has(seat)) removeHole(seat);
@@ -476,6 +502,11 @@ export function createStage(canvas) {
     if (!L) return;
     const hole = st.holes.get(seat);
     if (!hole) return;
+    if (isHero(seat) && hole.every((c) => c.faceUp)) {
+      for (const c of hole) c.folded = true;
+      await animateTones();
+      return;
+    }
     st.holes.delete(seat);
     const m = muckSpot(L);
     await Promise.all(
@@ -701,27 +732,277 @@ export function createStage(canvas) {
     for (const cb of layoutCbs) cb();
   }
 
-  function screenPos(seat, spot) {
-    if (!L || !cssW) return { x: 0, y: 0 };
-    let x = 0;
-    let y = 0;
-    let z = 0;
-    if (spot === 'plate') {
-      const p = plateSpot(L, v(seat));
-      x = p.x;
-      z = p.z;
-      y = 0.25;
-    } else if (spot === 'bet') {
-      const p = betSpot(L, v(seat));
-      x = p.x;
-      z = p.z;
-    } else if (spot === 'pot') {
-      const p = potSpot(L, 0, 1);
-      x = p.x;
-      z = p.z;
-    }
+  function project(x, y, z) {
     tmp.set(x, y, z).project(camera);
     return { x: ((tmp.x + 1) / 2) * cssW, y: ((1 - tmp.y) / 2) * cssH };
+  }
+
+  function addPoint(r, x, y, z) {
+    tmp.set(x, y, z).project(camera);
+    const sx = ((tmp.x + 1) / 2) * cssW;
+    const sy = ((1 - tmp.y) / 2) * cssH;
+    if (sx < r.l) r.l = sx;
+    if (sx > r.r) r.r = sx;
+    if (sy < r.t) r.t = sy;
+    if (sy > r.b) r.b = sy;
+    return r;
+  }
+
+  function unite(r, o) {
+    r.l = Math.min(r.l, o.l);
+    r.t = Math.min(r.t, o.t);
+    r.r = Math.max(r.r, o.r);
+    r.b = Math.max(r.b, o.b);
+    return r;
+  }
+
+  function boxRect(r, cx, cz, hw, hd, y0, y1) {
+    for (const dx of [-hw, hw]) for (const dz of [-hd, hd]) for (const y of [y0, y1]) addPoint(r, cx + dx, y, cz + dz);
+    return r;
+  }
+
+  function poseRect(r, p) {
+    eul.set(-Math.PI / 2 + p.tilt, p.yaw, 0);
+    m4.compose(tmp2.set(p.x, p.y, p.z), quat.setFromEuler(eul), scl.setScalar(p.scale));
+    for (const x of [-CARD.w / 2, CARD.w / 2])
+      for (const y of [-CARD.h / 2, CARD.h / 2])
+        for (const z of [-CARD.t / 2, CARD.t / 2]) {
+          tmp2.set(x, y, z).applyMatrix4(m4);
+          addPoint(r, tmp2.x, tmp2.y, tmp2.z);
+        }
+    return r;
+  }
+
+  function meshRect(r, mesh) {
+    const g = mesh.geometry;
+    const cyl = g.parameters;
+    if (cyl?.radiusTop !== undefined) {
+      // Box corners of a spun cylinder overshoot its silhouette by up to 41%; trace the rims instead.
+      const n = 16;
+      const k = 1 / Math.cos(Math.PI / n);
+      for (let i = 0; i < n; i++) {
+        const c = Math.cos((i / n) * Math.PI * 2) * k;
+        const sn = Math.sin((i / n) * Math.PI * 2) * k;
+        for (const [rad, y] of [[cyl.radiusTop, cyl.height / 2], [cyl.radiusBottom, -cyl.height / 2]]) {
+          tmp2.set(c * rad, y, sn * rad).applyMatrix4(mesh.matrixWorld);
+          addPoint(r, tmp2.x, tmp2.y, tmp2.z);
+        }
+      }
+      return r;
+    }
+    if (!g.boundingBox) g.computeBoundingBox();
+    const { min, max } = g.boundingBox;
+    for (const x of [min.x, max.x])
+      for (const y of [min.y, max.y])
+        for (const z of [min.z, max.z]) {
+          tmp2.set(x, y, z).applyMatrix4(mesh.matrixWorld);
+          addPoint(r, tmp2.x, tmp2.y, tmp2.z);
+        }
+    return r;
+  }
+
+  function shown(obj) {
+    for (let n = obj; n; n = n.parent) {
+      if (!n.visible) return false;
+      if (n === scene) return true;
+    }
+    return false;
+  }
+
+  function cardsRect(cards) {
+    const r = emptyRect();
+    for (const c of cards) if (shown(c.mesh)) meshRect(r, c.mesh);
+    return r;
+  }
+
+  function objectRect(obj) {
+    const r = emptyRect();
+    if (shown(obj)) obj.traverseVisible((m) => m.isMesh && meshRect(r, m));
+    return r;
+  }
+
+  /** Without HUD metrics the nameplates are assumed to have the design's sizes for this canvas. */
+  function defaultPlates() {
+    const phone = cssW / cssH < 1.05 ? cssW < 600 : cssH <= 520;
+    const wide = phone ? { w: 160, h: 56 } : { w: 172, h: 78 };
+    return cssW / cssH < 1.05 && phone ? { side: { w: 76, h: 100 }, top: wide } : { side: wide, top: wide };
+  }
+
+  function currentInsets() {
+    const I = insets || { top: 0, bottom: 0, left: 0, right: 0, plates: {} };
+    const d = I.plates.side ? null : defaultPlates();
+    const side = I.plates.side || d.side;
+    return { ...I, plates: { side, top: I.plates.top || (d ? d.top : side), hero: I.plates.hero || null } };
+  }
+
+  function freeRect(I = currentInsets()) {
+    const f = { l: I.left + FIT_MARGIN, t: I.top + FIT_MARGIN, r: cssW - I.right - FIT_MARGIN, b: cssH - I.bottom - FIT_MARGIN };
+    if (f.r - f.l >= 80 && f.b - f.t >= 80) return f;
+    return { l: FIT_MARGIN, t: FIT_MARGIN, r: cssW - FIT_MARGIN, b: cssH - FIT_MARGIN };
+  }
+
+  function plateSize(vi, I) {
+    return vi === 0 ? I.plates.hero : vi === 3 ? I.plates.top : I.plates.side;
+  }
+
+  function plateAnchor(vi, I = currentInsets()) {
+    const size = plateSize(vi, I);
+    const p = plateSpot(L, vi, !!size && size.h > size.w);
+    const y = p.out > 0 ? RAIL_Y : 0;
+    const A = project(p.x, y, p.z);
+    const B = project(p.x + p.tx * 0.05, y, p.z + p.tz * 0.05);
+    const C = project(0, y, 0);
+    let ux = A.y - B.y;
+    let uy = B.x - A.x;
+    const n = Math.hypot(ux, uy) || 1;
+    ux /= n;
+    uy /= n;
+    if (ux * (A.x - C.x) + uy * (A.y - C.y) < 0) {
+      ux = -ux;
+      uy = -uy;
+    }
+    return { x: A.x, y: A.y, ux, uy };
+  }
+
+  /** The HUD's placement rule: the plate sits wholly outside the tangent line through its anchor. */
+  function plateRect(P, size) {
+    const hw = size.w / 2;
+    const hh = size.h / 2;
+    const k = hw * Math.abs(P.ux) + hh * Math.abs(P.uy);
+    const cx = P.x + P.ux * k;
+    const cy = P.y + P.uy * k;
+    return { l: cx - hw, t: cy - hh, r: cx + hw, b: cy + hh };
+  }
+
+  function plateRects(I) {
+    const out = [];
+    for (let vi = 0; vi < SEATS; vi++) {
+      const size = plateSize(vi, I);
+      if (size) out.push(plateRect(plateAnchor(vi, I), size));
+    }
+    return out;
+  }
+
+  function boardRect() {
+    const r = emptyRect();
+    for (let i = 0; i < 5; i++) poseRect(r, boardPose(L, i));
+    return r;
+  }
+
+  /** Everything that may ever sit on the felt, at its largest, so the pot label slot never jumps. */
+  function feltObstacles(I) {
+    return [...plateRects(I), ...seatObstacles()];
+  }
+
+  /** Every seat's hole cards (revealed size), bet pile and button spot, plus the deck. */
+  function seatObstacles() {
+    const out = [];
+    for (let vi = 0; vi < SEATS; vi++) {
+      const r = emptyRect();
+      for (let i = 0; i < 2; i++) {
+        poseRect(r, holePose(L, vi, i, true, false));
+        if (vi === 0) poseRect(r, holePose(L, vi, i, true, true));
+      }
+      out.push(r);
+      const b = betSpot(L, vi);
+      out.push(boxRect(emptyRect(), b.x, b.z, PILE_HW, PILE_HD, 0, PILE_H));
+      const k = buttonSpot(L, vi);
+      out.push(boxRect(emptyRect(), k.x, k.z, BUTTON_R, BUTTON_R, 0, 0.06));
+    }
+    const d = deckPose(L);
+    out.push(boxRect(emptyRect(), d.x, d.z, CARD.h / 2, CARD.h / 2, 0, 0.11));
+    return out;
+  }
+
+  function potAnchor(count) {
+    const n = Math.max(1, Math.min(9, Math.floor(count) || 1));
+    const I = currentInsets();
+    const F = freeRect(I);
+    const obstacles = feltObstacles(I);
+    const piles = [];
+    for (let i = 0; i < n; i++) {
+      const s = potSpot(L, i, n);
+      piles.push(boxRect(emptyRect(), s.x, s.z, PILE_HW, PILE_HD, 0, PILE_H));
+    }
+    if (L.portrait) {
+      const B = boardRect();
+      const x = (B.l + B.r) / 2;
+      const y = B.b + POT_GAP;
+      let lo = F.l;
+      let hi = F.r;
+      for (const o of [...obstacles, ...piles]) {
+        if (o.b <= y || o.t >= y + POT_PILL_H) continue;
+        if (o.r <= x) lo = Math.max(lo, o.r);
+        else if (o.l >= x) hi = Math.min(hi, o.l);
+        else lo = hi = x;
+      }
+      const room = 2 * (Math.min(x - lo, hi - x) - POT_GAP);
+      const beside = cssW - I.left - I.right - 2 * I.plates.side.w - 4 * FIT_MARGIN;
+      return { x, y, align: 'below-board', maxW: Math.max(0, Math.min(room, beside)) };
+    }
+    const lead = piles.reduce((a, b) => (b.l < a.l ? b : a));
+    const x = lead.l - POT_GAP;
+    const row = potSpot(L, 0, n);
+    const y = project(row.x, 2 * CHIP_H, row.z).y;
+    let lo = F.l;
+    for (const o of [...obstacles, boardRect()]) {
+      if (o.b <= y - POT_PILL_H / 2 || o.t >= y + POT_PILL_H / 2 || o.l >= x) continue;
+      lo = Math.max(lo, Math.min(o.r, x));
+    }
+    return { x, y, align: 'left-of-chips', maxW: Math.max(0, x - lo - POT_GAP) };
+  }
+
+  function heroRect() {
+    const cards = st.heroSeat >= 0 && isHero(st.heroSeat) ? st.holes.get(st.heroSeat) : null;
+    if (!cards) return null;
+    scene.updateMatrixWorld();
+    const r = cardsRect(cards);
+    return isRect(r) ? r : null;
+  }
+
+  /**
+   * CSS px relative to the canvas, or null before the first layout.
+   * 'plate' {x,y,ux,uy} · 'board' {x,y,l,t,r,b} · 'pot' {x,y,align,maxW} (opts.pots) · 'hero' {l,t,r,b}|null · 'bet' {x,y}
+   * · 'felt' [{l,t,r,b}]: board and every seat's cards, bet and button spots, whether or not occupied now
+   */
+  function screenPos(seat, spot, opts) {
+    if (!L || !cssW) return null;
+    switch (spot) {
+      case 'plate':
+        return plateAnchor(v(seat));
+      case 'board': {
+        const r = boardRect();
+        return { x: (r.l + r.r) / 2, y: (r.t + r.b) / 2, l: r.l, t: r.t, r: r.r, b: r.b };
+      }
+      case 'pot':
+        return potAnchor(opts?.pots);
+      case 'hero':
+        return heroRect();
+      case 'bet': {
+        const p = betSpot(L, v(seat));
+        return project(p.x, 0, p.z);
+      }
+      case 'felt':
+        return [boardRect(), ...seatObstacles()].filter(isRect);
+      default:
+        return null;
+    }
+  }
+
+  /** Projected bounds of what is on the table right now, for overlap checks. */
+  function screenRects() {
+    if (!L || !cssW) return [];
+    scene.updateMatrixWorld();
+    const out = [];
+    const add = (kind, seat, r) => {
+      if (isRect(r)) out.push({ kind, seat, l: r.l, t: r.t, r: r.r, b: r.b });
+    };
+    add('board', null, cardsRect(st.board));
+    for (const [seat, cards] of st.holes) add('hole', seat, cardsRect(cards));
+    for (const [seat, pile] of st.bets) add('betPile', seat, objectRect(pile.group));
+    for (const pile of st.pots) add('potPile', null, objectRect(pile.group));
+    add('button', st.buttonSeat, objectRect(button));
+    return out;
   }
 
   function onLayout(cb) {
@@ -729,24 +1010,25 @@ export function createStage(canvas) {
     return () => layoutCbs.delete(cb);
   }
 
-  const fitPts = [];
   function fitCamera() {
     const w = cssW;
     const h = cssH;
+    const I = currentInsets();
+    const F = freeRect(I);
     camera.fov = L.fov;
     camera.aspect = w / h;
+    // Centre the table on the free rectangle by shifting the principal point, which keeps the view square-on.
+    const dx = (F.l + F.r - w) / 2;
+    if (Math.abs(dx) >= 0.5) camera.setViewOffset(w, h, -dx, 0, w, h);
+    else camera.clearViewOffset();
     camera.updateProjectionMatrix();
-    fitPts.length = 0;
-    const R = L.rail;
+
+    const rail = [];
     for (let i = 0; i < 48; i++) {
       const a = (i / 48) * Math.PI * 2;
-      fitPts.push({ x: Math.cos(a) * (L.rx + R), y: 0.3, z: Math.sin(a) * (L.rz + R), px: 6, py: 6 });
+      rail.push(Math.cos(a) * (L.rx + L.rail), Math.sin(a) * (L.rz + L.rail));
     }
-    const padX = Math.min(64, w * 0.13);
-    for (let i = 0; i < SEATS; i++) {
-      const p = plateSpot(L, i);
-      fitPts.push({ x: p.x, y: 0.25, z: p.z, px: padX, py: 32 });
-    }
+    const hero = [holePose(L, 0, 0, true, true), holePose(L, 0, 1, true, true)];
     const pitch = L.pitch;
     const place = (D, tz) => {
       camera.position.set(0, D * Math.sin(pitch), tz + D * Math.cos(pitch));
@@ -755,40 +1037,108 @@ export function createStage(canvas) {
     };
     const slack = (D, tz) => {
       place(D, tz);
-      let left = Infinity;
-      let right = Infinity;
-      let top = Infinity;
-      let bottom = Infinity;
-      for (const p of fitPts) {
-        tmp.set(p.x, p.y, p.z).project(camera);
-        const sx = ((tmp.x + 1) / 2) * w;
-        const sy = ((1 - tmp.y) / 2) * h;
-        left = Math.min(left, sx - p.px);
-        right = Math.min(right, w - sx - p.px);
-        top = Math.min(top, sy - p.py);
-        bottom = Math.min(bottom, h - sy - p.py);
-      }
-      return { left, right, top, bottom };
+      const r = emptyRect();
+      for (let i = 0; i < rail.length; i += 2) addPoint(r, rail[i], RAIL_Y, rail[i + 1]);
+      for (const p of hero) poseRect(r, p);
+      for (const p of plateRects(I)) unite(r, p);
+      return { left: r.l - F.l, right: F.r - r.r, top: r.t - F.t, bottom: F.b - r.b };
     };
-    let tz = 0;
-    let D = 20;
-    for (let iter = 0; iter < 4; iter++) {
+    const closest = (tz) => {
       let lo = 2;
-      let hi = 120;
+      let hi = 160;
       for (let j = 0; j < 26; j++) {
         const mid = (lo + hi) / 2;
         const s = slack(mid, tz);
         if (Math.min(s.left, s.right, s.top, s.bottom) >= 0) hi = mid;
         else lo = mid;
       }
-      D = hi;
+      return hi;
+    };
+    let tz = 0;
+    let D = closest(tz);
+    for (let iter = 0; iter < 8; iter++) {
       const s = slack(D, tz);
+      if (Math.abs(s.bottom - s.top) < 1) break;
       const worldPerPx = (2 * D * Math.tan((camera.fov * Math.PI) / 360)) / h;
       tz -= ((s.bottom - s.top) / 2) * worldPerPx / Math.sin(pitch);
+      D = closest(tz);
     }
     place(D, tz);
     scene.fog.near = D * 1.05;
     scene.fog.far = D * 2.6;
+  }
+
+  function rebuild() {
+    table.build(L);
+    const reach = Math.max(L.rx, L.rz) + L.rail;
+    spot.position.set(0, 12, L.portrait ? 0 : 1.5);
+    spot.angle = Math.atan2(reach + 1.0, 12);
+    spot.target.position.set(0, 0, 0);
+    tw.cancelAll();
+    placeAll();
+  }
+
+  /** 2 when nameplates stay apart, +1 when the pot label has a usable slot; ties go to the bigger board. */
+  function rateFraming() {
+    const plates = plateRects(currentInsets());
+    let apart = true;
+    for (let i = 0; i < plates.length && apart; i++)
+      for (let j = i + 1; j < plates.length; j++) if (hits(plates[i], plates[j])) apart = false;
+    const board = boardRect();
+    return { score: (apart ? 2 : 0) + (potAnchor(3).maxW >= POT_MIN_W ? 1 : 0), board: board.r - board.l };
+  }
+
+  /**
+   * makeLayout's pick unless its framing collides; then the next choice (a longer portrait table, or
+   * landscape side plates moved to the ends) that frames best.
+   */
+  function chooseLayout() {
+    const F = freeRect();
+    const choices = layoutChoices(cssW / cssH, (F.r - F.l) / (F.b - F.t));
+    const keep = L;
+    let best = null;
+    for (const cand of choices) {
+      L = cand;
+      fitCamera();
+      const r = rateFraming();
+      if (!best || r.score > best.score || (r.score === best.score && r.board > best.board + 0.5)) best = { ...r, cand };
+      if (best.score === 3 && cand.portrait) break;
+    }
+    L = keep;
+    return best.cand;
+  }
+
+  /** Inset changes wait for running animations before swapping the table shape; resizes do not. */
+  function refit(fromInsets) {
+    const next = chooseLayout();
+    // Variants of one table shape differ only in where the HUD anchors its nameplates.
+    const reshape = !L || next.portrait !== L.portrait || next.rz !== L.rz;
+    pendingRebuild = reshape && fromInsets && !!L && tw.busy;
+    if (next !== L && !pendingRebuild) {
+      L = next;
+      if (reshape) rebuild();
+    }
+    fitCamera();
+    dirty = true;
+    for (const cb of layoutCbs) cb();
+  }
+
+  function setInsets(o = {}) {
+    const px = (x) => Math.max(0, Math.round(Number(x) || 0));
+    const size = (p) => (p && px(p.w) > 0 && px(p.h) > 0 ? { w: px(p.w), h: px(p.h) } : null);
+    const next = {
+      top: px(o.top),
+      bottom: px(o.bottom),
+      left: px(o.left),
+      right: px(o.right),
+      plates: { side: size(o.plates?.side), top: size(o.plates?.top), hero: size(o.plates?.hero) },
+    };
+    const key = JSON.stringify(next);
+    if (key === insetKey) return false;
+    insetKey = key;
+    insets = next;
+    if (cssW) refit(true);
+    return true;
   }
 
   function layout() {
@@ -799,18 +1149,6 @@ export function createStage(canvas) {
     cssH = h;
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.setSize(w, h, false);
-    const next = makeLayout(w / h);
-    const changed = next !== L;
-    L = next;
-    if (changed) {
-      table.build(L);
-      const reach = Math.max(L.rx, L.rz) + L.rail;
-      spot.position.set(0, 12, L.portrait ? 0 : 1.5);
-      spot.angle = Math.atan2(reach + 1.0, 12);
-      spot.target.position.set(0, 0, 0);
-      tw.cancelAll();
-      placeAll();
-    }
     const size = Math.min(w, h) < 700 ? 1024 : 2048;
     if (spot.shadow.mapSize.x !== size) {
       spot.shadow.mapSize.set(size, size);
@@ -819,9 +1157,7 @@ export function createStage(canvas) {
         spot.shadow.map = null;
       }
     }
-    fitCamera();
-    dirty = true;
-    for (const cb of layoutCbs) cb();
+    refit(false);
   }
 
   const ro = new ResizeObserver(() => layout());
@@ -842,6 +1178,7 @@ export function createStage(canvas) {
     last = now;
     const busy = tw.busy;
     if (busy) tw.update(dt);
+    if (pendingRebuild && !tw.busy) refit(false);
     if ((busy || dirty) && L) {
       renderer.render(scene, camera);
       dirty = false;
@@ -890,6 +1227,8 @@ export function createStage(canvas) {
     highlightCards: wrap(highlightCards),
     clearHighlight: wrap(clearHighlight),
     screenPos,
+    screenRects,
+    setInsets,
     onLayout,
     dispose,
   };
