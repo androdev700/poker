@@ -50,7 +50,7 @@ function feltTexture(L, maxAniso) {
   g.putImageData(img, 0, 0);
 
   const pxPerUnit = W / (2 * L.rx);
-  const lineInset = L.portrait ? 1.08 : 1.2;
+  const lineInset = 1.2;
   g.save();
   g.translate(W / 2, H / 2);
   g.strokeStyle = 'rgba(236, 214, 160, 0.42)';

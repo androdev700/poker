@@ -7,11 +7,15 @@ import * as sound from './sound.js';
 import { createNet } from './net.js';
 import { createStore, profileFromUrl } from './store.js';
 import { createDirector } from './director.js';
+import * as viewport from './viewport.js';
 
 const SESSION_GONE = new Set([ERR.NO_ROOM, ERR.BAD_TOKEN, ERR.ROOM_CLOSED]);
 const CODE_STRIP = new RegExp(`[^${CODE_ALPHABET}]`, 'g');
 
+const tableEl = document.getElementById('table');
+const screensEl = document.getElementById('screens');
 const hudRoot = document.getElementById('hud');
+viewport.init(tableEl);
 const store = createStore({ profile: profileFromUrl() });
 const stage = createStage(document.getElementById('stage'));
 
@@ -73,7 +77,8 @@ const actionbar = {
   },
 };
 
-const lobby = createLobby(document.getElementById('screens'), {
+const lobby = createLobby(screensEl, {
+  toastHost: () => (screen === 'table' ? tableEl : screensEl),
   onCreate: ({ name, config }) => hello({ t: 'create', name, config }),
   onJoin: ({ code, name }) => {
     const token = store.session ? null : store.tokenFor(code);
@@ -116,9 +121,10 @@ connPill.className = 'conn-pill glass';
 connPill.setAttribute('role', 'status');
 connPill.textContent = 'Reconnecting…';
 connPill.hidden = true;
-document.body.append(connPill);
 
 function updateConnPill() {
+  const host = screen === 'table' ? tableEl : document.body;
+  if (connPill.parentElement !== host) host.append(connPill);
   const inGame = !!store.session && (screen === 'table' || screen === 'waiting');
   connPill.hidden = !(inGame && !net.connected);
   hud.refresh();
@@ -172,8 +178,22 @@ function route() {
   } else if (screen !== 'table') {
     screen = 'table';
     lobby.hide();
+    viewport.check();
+    showTurnCue();
   }
   updateConnPill();
+}
+
+let cueShown = false;
+function showTurnCue() {
+  if (cueShown || !viewport.isRotated()) return;
+  cueShown = true;
+  const cue = document.createElement('div');
+  cue.className = 'turn-cue glass';
+  cue.setAttribute('role', 'status');
+  cue.textContent = 'Turn your phone sideways';
+  tableEl.append(cue);
+  setTimeout(() => cue.remove(), 2600);
 }
 
 const seatedCount = (v) => (v?.seats || []).filter(Boolean).length;
@@ -298,6 +318,7 @@ function queueLayout() {
   });
 }
 window.addEventListener('resize', queueLayout);
+viewport.onChange(queueLayout);
 // A 180° turn on iOS moves the notch to the other side without resizing the viewport.
 window.screen.orientation?.addEventListener?.('change', queueLayout);
 window.addEventListener('orientationchange', queueLayout);

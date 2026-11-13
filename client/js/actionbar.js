@@ -147,7 +147,15 @@ export function createActionBar(root, { onAction }) {
     if (open && (!cur?.legal.raise || busy)) return;
     panelOpen = open;
     root.classList.toggle('is-raising', open);
-    if (open) setAmount(cur.legal.raise.min === cur.legal.raise.max ? cur.legal.raise.max : amount);
+    if (open) {
+      // A rotated table would get the soft keyboard sideways; slider and presets still set the amount.
+      const rotated = document.documentElement.hasAttribute('data-rotated');
+      amountInput.readOnly = rotated;
+      amountInput.inputMode = rotated ? 'none' : 'numeric';
+      amountInput.tabIndex = rotated ? -1 : 0;
+      amountInput.style.pointerEvents = rotated ? 'none' : '';
+      setAmount(cur.legal.raise.min === cur.legal.raise.max ? cur.legal.raise.max : amount);
+    }
     // A button focused by an earlier tap would otherwise swallow Enter and fire itself (e.g. Call).
     if (open && root.contains(document.activeElement)) confirmBtn.focus({ preventScroll: true });
   }
@@ -159,6 +167,7 @@ export function createActionBar(root, { onAction }) {
   }
 
   function commitTyped() {
+    if (amountInput.readOnly) return;
     const typed = parseInt(amountInput.value.replace(/[^0-9]/g, ''), 10);
     if (Number.isFinite(typed) && typed !== amount) setAmount(typed);
   }

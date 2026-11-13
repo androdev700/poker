@@ -1,4 +1,4 @@
-import { el, button, fmtChips, miniCard } from './hud.js';
+import { el, button, fmtChips, fmtTight, miniCard } from './hud.js';
 
 const SEATS = 6;
 const ICON_CHEVRON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 15l6-6 6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
@@ -11,7 +11,7 @@ function listNames(names) {
 }
 
 /** Everything the panel shows, as plain data; equal models render identically. */
-function model(ds, { canDeal = false, waiting = false, away = false, busted = false, myStack = null } = {}) {
+function model(ds, { canDeal = false, waiting = false, away = false, busted = false, myStack = null, compact = false } = {}) {
   const hand = ds.hand;
   const res = ds.results;
   const seats = ds.seats || [];
@@ -80,13 +80,13 @@ function model(ds, { canDeal = false, waiting = false, away = false, busted = fa
     away: !!away,
     busted: !!busted,
     myStack: Number.isFinite(myStack) ? myStack : null,
+    compact: !!compact,
     live,
   };
 }
 
 /**
- * The end-of-hand panel: bottom sheet in portrait, docked panel in landscape (placement is CSS, sizing is
- * hud.layout()). render() is called every animation step and is a no-op unless the model changed.
+ * The end-of-hand panel, docked to the table (placement is CSS, sizing is hud.layout()). render() is called every animation step and is a no-op unless the model changed.
  * @param {HTMLElement} root
  * @param {{onStart:()=>void, onBack?:()=>void, onToggle?:()=>void}} handlers
  */
@@ -145,7 +145,7 @@ export function createResults(root, { onStart, onBack, onToggle }) {
     const cards = el('div', 'results-cards');
     for (const c of r.cards || []) cards.append(miniCard(c));
     const amt = el('div', 'results-amt');
-    if (r.amount > 0) amt.append(el('div', 'results-plus', `+${fmtChips(r.amount)}`));
+    if (r.amount > 0) amt.append(el('div', 'results-plus', `+${(m.compact ? fmtTight : fmtChips)(r.amount)}`));
     if (r.tags.length) amt.append(el('div', 'results-tags', r.tags.join(' · ')));
     row.append(badge, who, cards, amt);
     return row;

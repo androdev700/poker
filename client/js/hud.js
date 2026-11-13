@@ -24,9 +24,9 @@ function fmtK(n) {
   return Math.abs(k) < 1000 ? `${k}K` : `${Number((n / 1e6).toPrecision(3))}M`;
 }
 
-// The 76px vertical plate cannot fit "Raise 12,500" in its action slot, nor a phone top bar "5,000/10,000";
-// both abbreviate from 10,000.
-const fmtTight = (n) => (Math.abs(n) >= 1e4 && Math.abs(n) < 1e6 ? fmtK(n) : fmtCompact(n));
+// Compact plates cannot fit "in 12,500" beside a stack (the narrow one not even "96,400 in 210K"), so they
+// abbreviate from 10,000.
+export const fmtTight = (n) => (Math.abs(n) >= 1e4 && Math.abs(n) < 1e6 ? fmtK(n) : fmtCompact(n));
 
 export function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -61,7 +61,7 @@ export function miniCard(code) {
   return el('span', red ? 'mini-card is-red' : 'mini-card', (code[0] === 'T' ? '10' : code[0]) + SUIT_GLYPH[code[1]]);
 }
 
-export function showHandRankings() {
+export function showHandRankings(host = document.body) {
   const scrim = el('div', 'dialog-scrim');
   const box = el('div', 'dialog glass ranks');
   box.setAttribute('role', 'dialog');
@@ -88,7 +88,7 @@ export function showHandRankings() {
     close
   );
   scrim.append(box);
-  document.body.append(scrim);
+  host.append(scrim);
   const onKey = (e) => {
     e.stopPropagation();
     if (e.key === 'Escape') done();
@@ -104,7 +104,7 @@ export function showHandRankings() {
 }
 
 /** Modal confirm. Resolves true on confirm, false on cancel / Esc / backdrop tap. */
-export function confirmDialog({ title, body, confirmLabel = 'Confirm', cancelLabel = 'Cancel', danger = false }) {
+export function confirmDialog({ title, body, confirmLabel = 'Confirm', cancelLabel = 'Cancel', danger = false, host = document.body }) {
   return new Promise((resolve) => {
     const scrim = el('div', 'dialog-scrim');
     const box = el('div', 'dialog glass');
@@ -121,7 +121,7 @@ export function confirmDialog({ title, body, confirmLabel = 'Confirm', cancelLab
     if (body) box.append(el('p', 'dialog-body', body));
     box.append(actions);
     scrim.append(box);
-    document.body.append(scrim);
+    host.append(scrim);
 
     // Capture-phase so game shortcuts (F/C/R, Esc) never fire underneath an open dialog.
     const onKey = (e) => {
@@ -149,40 +149,25 @@ const RING_SVG = `<svg class="plate-ring" viewBox="0 0 48 48" aria-hidden="true"
 const WARN_MS = 5000;
 const SEATS = 6;
 
-// Plate footprints and top-bar heights per size class; style.css sizes the same boxes.
-const DIMS = { v: { w: 76, h: 100 }, c: { w: 160, h: 56 }, f: { w: 172, h: 78 } };
+// Plate footprints and top-bar heights per size class; style.css sizes the same boxes. `dock` is the smallest
+// box the action bar takes in the free rect's bottom-right corner (its 220x66 plus margins beyond GAP).
+const DIMS = { n: { w: 136, h: 52 }, c: { w: 160, h: 56 }, f: { w: 172, h: 78 } };
 const SIZES = {
-  'phone-portrait': { bar: 52, side: 'v', top: 'c', hero: null },
-  tall: { bar: 58, side: 'f', top: 'f', hero: null },
-  'phone-landscape': { bar: 50, side: 'c', top: 'c', hero: 'c' },
+  compact: { bar: 50, side: 'n', top: 'n', hero: 'c', dock: { w: 224, h: 68 } },
   wide: { bar: 58, side: 'f', top: 'f', hero: 'f' },
 };
 const GAP = 6;
 const PUSH_GAP = 4;
 const SLIDE_TOL = 8;
-const DOCK_STRIP = 32;
-const DOCK_ROW = 72;
 const COLLAPSED_MIN_W = 200;
 
-function classify(w, h) {
-  const portrait = w / Math.max(1, h) < 1.05;
-  const size = portrait ? (w < 600 ? 'phone-portrait' : 'tall') : h <= 520 ? 'phone-landscape' : 'wide';
-  return { form: portrait ? 'portrait' : 'landscape', size };
-}
+const classify = (h) => (h <= 520 ? 'compact' : 'wide');
 
 function setText(node, text) {
   if (node._t !== text) {
     node._t = text;
     node.textContent = text;
   }
-}
-
-function setMiniCards(node, cards) {
-  const key = cards ? cards.join('') : '';
-  if (node._k === key) return;
-  node._k = key;
-  node.replaceChildren(...(cards || []).map(miniCard));
-  node.hidden = !key;
 }
 
 function setHidden(node, hidden) {
@@ -241,7 +226,8 @@ export function createHud(root, opts) {
   dealItem.setAttribute('role', 'menuitem');
   closeItem.setAttribute('role', 'menuitem');
   menu.append(dealItem, closeItem);
-  const helpBtn = button('icon-btn glass hud-help', '?', () => showHandRankings());
+  const overlayHost = () => root.parentElement || document.body;
+  const helpBtn = button('icon-btn glass hud-help', '?', () => showHandRankings(overlayHost()));
   helpBtn.setAttribute('aria-label', 'Hand rankings');
   tools.append(helpBtn, muteBtn, menuBtn, menu);
   top.append(info, tools);
@@ -253,22 +239,6 @@ export function createHud(root, opts) {
   const potSplit = el('span', 'hud-pot-split');
   pot.append(el('span', 'hud-pot-label', 'Pot'), potAmt, potSplit);
   pot.hidden = true;
-
-  const hero = el('div', 'hero-strip');
-  const heroAv = el('div', 'hero-av');
-  heroAv.innerHTML = RING_SVG;
-  const heroRing = heroAv.querySelector('.ring-fg');
-  const heroInitial = el('span', 'hero-initial');
-  heroAv.append(heroInitial);
-  const heroName = el('span', 'hero-name');
-  const heroDealer = el('span', 'hero-badge hero-dealer', 'D');
-  const heroBlind = el('span', 'hero-badge');
-  const heroCards = el('span', 'hero-cards');
-  heroCards.hidden = true;
-  const heroStack = el('span', 'hero-stack');
-  const heroInPot = el('span', 'hero-inpot');
-  hero.append(heroAv, heroName, heroDealer, heroBlind, heroCards, heroStack, heroInPot);
-  hero.hidden = true;
 
   const status = el('div', 'dock-status');
   const statusText = el('span', 'dock-status-text');
@@ -284,7 +254,7 @@ export function createHud(root, opts) {
   });
 
   const safeProbe = el('div', 'hud-safe-probe');
-  root.append(safeProbe, pot, plateLayer, status, hero, resultsHost, top);
+  root.append(safeProbe, pot, plateLayer, status, resultsHost, top);
 
   const seatEls = [];
   let lastDs = null;
@@ -293,7 +263,6 @@ export function createHud(root, opts) {
   let menuOpen = false;
   let timerSeat = null;
   let closing = false;
-  let form = '';
   let size = '';
   let mySeat = 0;
   let barRect = null;
@@ -336,6 +305,7 @@ export function createHud(root, opts) {
       body: 'This ends the game for everyone. Live bets are returned and the final scoreboard is shown.',
       confirmLabel: 'Close table',
       danger: true,
+      host: overlayHost(),
     });
     closing = false;
     if (ok) opts.onCloseTable?.();
@@ -353,9 +323,11 @@ export function createHud(root, opts) {
 
   const connected = () => opts.isConnected?.() ?? true;
 
+  // #table, not the window: when the table is drawn rotated its client size is the logical landscape size.
   function viewport() {
-    const w = root.clientWidth || document.documentElement.clientWidth || innerWidth;
-    const h = root.clientHeight || document.documentElement.clientHeight || innerHeight;
+    const host = root.parentElement;
+    const w = root.clientWidth || host?.clientWidth || 0;
+    const h = root.clientHeight || host?.clientHeight || 0;
     return { w, h };
   }
 
@@ -371,17 +343,15 @@ export function createHud(root, opts) {
 
   /** Re-derives the size class; restyles plates and notifies when it changed. */
   function applySize() {
-    const { w, h } = viewport();
-    const c = classify(w, h);
-    if (c.form === form && c.size === size) return false;
-    form = c.form;
-    size = c.size;
-    root.dataset.form = form;
+    const { h } = viewport();
+    const next = classify(h);
+    if (next === size) return false;
+    size = next;
     root.dataset.size = size;
     for (const s of seatEls) if (s) shapeSeat(s);
     layoutSig = '';
     if (ready) opts.onSizeClass?.();
-    // The hero strip, dock status and plate texts depend on the class; nothing else re-renders a static table.
+    // Plate texts depend on the class; nothing else re-renders a static table.
     if (lastDs && !rendering) render(lastDs);
     return true;
   }
@@ -397,11 +367,10 @@ export function createHud(root, opts) {
 
   function shapeSeat(s) {
     const shape = shapeOf(s.seat);
-    s.docked = !shape;
-    s.dims = DIMS[shape || 'c'];
-    if (s.plate.dataset.shape !== (shape || 'c')) s.plate.dataset.shape = shape || 'c';
-    setHidden(s.plate, s.docked);
+    s.dims = DIMS[shape];
+    if (s.plate.dataset.shape !== shape) s.plate.dataset.shape = shape;
     s.act._t = null;
+    s.stack._t = null;
     s.inPot._t = null;
   }
 
@@ -409,14 +378,14 @@ export function createHud(root, opts) {
     applySize();
     const k = SIZES[size] || SIZES.wide;
     const sa = safe();
-    const portrait = form === 'portrait';
-    const dims = (shape) => (shape ? { ...DIMS[shape] } : null);
+    const dims = (shape) => ({ ...DIMS[shape] });
     return {
       top: Math.round(sa.t + k.bar + GAP),
-      bottom: Math.round(sa.b + (portrait ? DOCK_ROW + DOCK_STRIP : 0) + GAP),
+      bottom: Math.round(sa.b + GAP),
       left: Math.round(sa.l + GAP),
       right: Math.round(sa.r + GAP),
       plates: { side: dims(k.side), top: dims(k.top), hero: dims(k.hero) },
+      dock: k.dock ? { ...k.dock } : null,
     };
   }
 
@@ -444,7 +413,7 @@ export function createHud(root, opts) {
     card.append(av, infoEl);
     plate.append(act, card);
     plateLayer.append(plate);
-    const s = { seat, plate, act, ring, initial, dealer, blind, name, stack, inPot, docked: false, dims: DIMS.c };
+    const s = { seat, plate, act, ring, initial, dealer, blind, name, stack, inPot, dims: DIMS.c };
     shapeSeat(s);
     return s;
   }
@@ -482,16 +451,16 @@ export function createHud(root, opts) {
     setText(s.name, sv.name);
     if (s.name.title !== sv.name) s.name.title = sv.name;
     setText(s.initial, initialOf(sv.name));
-    setText(s.stack, fmtCompact(sv.busted ? 0 : sv.stack));
+    setText(s.stack, (shape === 'n' ? fmtTight : fmtCompact)(sv.busted ? 0 : sv.stack));
 
     const [act, kind] = actionOf(sv, p, ds);
-    const actText = Array.isArray(act) ? `${act[0]} ${(shape === 'v' ? fmtTight : fmtCompact)(act[1])}` : act;
+    const actText = Array.isArray(act) ? `${act[0]} ${fmtCompact(act[1])}` : act;
     setText(s.act, actText);
     if (s.act.dataset.kind !== kind) s.act.dataset.kind = kind;
 
     const won = ds.winners?.[s.seat] || 0;
     const committed = live && p?.committed > 0 ? p.committed : 0;
-    const fmtIn = shape === 'c' ? fmtTight : fmtCompact;
+    const fmtIn = shape === 'f' ? fmtCompact : fmtTight;
     const inPot = won > 0 ? `+${fmtIn(won)}` : committed ? `${shape === 'f' ? 'In pot' : 'in'} ${fmtIn(committed)}` : '';
     setText(s.inPot, inPot);
 
@@ -509,48 +478,13 @@ export function createHud(root, opts) {
     toggle(s.plate, 'is-winner', won > 0);
   }
 
-  function updateHero(ds) {
-    const { hand, you, seats } = ds;
-    const me = you?.seat;
-    const sv = me != null ? seats?.[me] : null;
-    const show = form === 'portrait' && !!sv && !(results.isOpen() && !results.isCollapsed());
-    setHidden(hero, !show);
-    if (!sv) return;
-    const p = hand?.players?.[me];
-    const live = !!hand && hand.phase !== 'complete';
-    const won = ds.winners?.[me] || 0;
-    setText(heroName, sv.name);
-    if (heroName.title !== sv.name) heroName.title = sv.name;
-    setText(heroInitial, initialOf(sv.name));
-    setText(heroStack, sv.busted ? 'Out' : fmtCompact(sv.stack));
-    const committed = live && p?.committed > 0 ? p.committed : 0;
-    setText(heroInPot, won > 0 ? `+${fmtCompact(won)}` : committed ? `in ${fmtCompact(committed)}` : '');
-    setHidden(heroInPot, !(won > 0 || committed));
-    setHidden(heroDealer, !(hand && hand.button === me));
-    const blind = hand && hand.sbSeat === me ? 'SB' : hand && hand.bbSeat === me ? 'BB' : '';
-    setText(heroBlind, blind);
-    setHidden(heroBlind, !blind);
-    setMiniCards(heroCards, p?.cards || null);
-    toggle(hero, 'is-turn', live && hand.toAct === me);
-    toggle(hero, 'is-folded', !!p?.folded);
-    toggle(hero, 'is-winner', won > 0);
-    toggle(hero, 'is-busted', !!sv.busted);
-  }
-
   function statusOf(ds) {
-    const { hand, you, seats } = ds;
+    const { you, seats } = ds;
     const me = you?.seat;
     const sv = me != null ? seats?.[me] : null;
     if (!sv) return { text: '', back: false };
     if (sv.busted) return { text: 'You’re out — spectating', back: false };
-    if (sv.away) return { text: '', back: connected() };
-    if (form !== 'portrait' || !hand || hand.phase === 'complete') return { text: '', back: false };
-    const p = hand.players?.[me];
-    if (!p) return { text: 'You’re in from the next hand', back: false };
-    if (p.folded) return { text: 'You folded', back: false };
-    // The status line is only on screen while the action bar is not, i.e. while the turn cannot be played yet.
-    if (hand.toAct == null || hand.toAct === me) return { text: '', back: false };
-    return { text: `${seats?.[hand.toAct]?.name ?? 'Next player'} to act`, back: false };
+    return { text: '', back: !!sv.away && connected() };
   }
 
   function updateStatus(ds) {
@@ -558,11 +492,8 @@ export function createHud(root, opts) {
     setText(statusText, st.text);
     setHidden(statusText, !st.text);
     setHidden(backBtn, !st.back);
-    const portrait = form === 'portrait';
-    const has = !!(st.text || st.back);
-    const show = !barRect && !results.isOpen() && (portrait || has) && !!lastDs?.you;
+    const show = !barRect && !results.isOpen() && !!(st.text || st.back) && !!lastDs?.you;
     setHidden(status, !show);
-    toggle(status, 'is-empty', !has);
   }
 
   function updateTimer(ds) {
@@ -576,11 +507,6 @@ export function createHud(root, opts) {
         toggle(prev.plate, 'is-warn', false);
         toggle(prev.plate, 'has-timer', false);
       }
-      if (timerSeat === ds.you?.seat || seat == null) {
-        heroRing.style.strokeDashoffset = '0';
-        toggle(hero, 'is-warn', false);
-        toggle(hero, 'has-timer', false);
-      }
     }
     timerSeat = seat;
     if (seat == null) return;
@@ -591,11 +517,6 @@ export function createHud(root, opts) {
       s.ring.style.strokeDashoffset = off;
       toggle(s.plate, 'has-timer', true);
       toggle(s.plate, 'is-warn', left <= WARN_MS);
-    }
-    if (seat === ds.you?.seat) {
-      heroRing.style.strokeDashoffset = off;
-      toggle(hero, 'has-timer', true);
-      toggle(hero, 'is-warn', left <= WARN_MS);
     }
   }
 
@@ -665,8 +586,8 @@ export function createHud(root, opts) {
       away: !!(me?.away && !me.busted && connected()),
       busted: !!me?.busted,
       myStack: me && !me.busted ? me.stack : null,
+      compact: size === 'compact',
     });
-    updateHero(ds);
     updateStatus(ds);
     updateTimer(ds);
 
@@ -677,7 +598,6 @@ export function createHud(root, opts) {
       pot.hidden ? 0 : 1,
       results.state(),
       size,
-      hero.hidden ? 0 : 1,
       status.hidden ? 0 : 1,
       potAmt._t,
       potSplit._t,
@@ -703,10 +623,7 @@ export function createHud(root, opts) {
     const same = next === barRect || (next && barRect && ['l', 't', 'r', 'b'].every((k) => Math.round(next[k]) === Math.round(barRect[k])));
     if (same) return;
     barRect = next;
-    if (lastDs) {
-      updateStatus(lastDs);
-      updateHero(lastDs);
-    }
+    if (lastDs) updateStatus(lastDs);
     layout();
   }
 
@@ -714,16 +631,11 @@ export function createHud(root, opts) {
     const node = results.el;
     if (!results.isOpen()) return;
     const boardB = board ? board.b : h * 0.55;
-    if (form === 'portrait') {
-      let floor = Math.max(boardB, potRect ? potRect.b : 0);
-      node.style.width = '';
-      node.style.maxHeight = `${Math.max(Math.round(h - floor - 12), 120)}px`;
-      return;
-    }
     const right = sa.r + 8;
-    const room = w - right - (board ? board.r : w * 0.62) - 16;
-    const beside = room >= 264;
-    let width = beside ? Math.min(400, room) : Math.min(400, w - sa.l - right - 8);
+    const [gap, minW, maxW] = size === 'compact' ? [8, 200, 360] : [16, 264, 400];
+    const room = w - right - (board ? board.r : w * 0.62) - gap;
+    const beside = room >= minW;
+    let width = beside ? Math.min(maxW, room) : Math.min(maxW, w - sa.l - right - 8);
     if (results.isCollapsed()) {
       // Collapsing exists to uncover the table, so the header row stops short of the plates beside it; plates
       // further right than that are left to slide clear.
@@ -760,10 +672,7 @@ export function createHud(root, opts) {
     const ph = pot.offsetHeight;
     let l;
     let t;
-    if (a.align === 'below-board') {
-      l = a.x - pw / 2;
-      t = a.y;
-    } else if (a.align === 'left-of-chips') {
+    if (a.align === 'left-of-chips') {
       l = a.x - pw;
       t = a.y - ph / 2;
     } else {
@@ -773,7 +682,7 @@ export function createHud(root, opts) {
     l = Math.min(Math.max(l, box.l), box.r - pw);
     t = Math.min(Math.max(t, box.t), box.b - ph);
     if (board && hit({ l, t, r: l + pw, b: t + ph }, board, 4)) {
-      t = a.align === 'below-board' ? board.b + 4 : Math.max(box.t, board.t - 4 - ph);
+      t = Math.max(box.t, board.t - 4 - ph);
     }
     pot.style.transform = `translate3d(${Math.round(l)}px, ${Math.round(t)}px, 0)`;
     return { l: Math.round(l), t: Math.round(t), r: Math.round(l) + pw, b: Math.round(t) + ph };
@@ -834,7 +743,7 @@ export function createHud(root, opts) {
     const board = rectOf(boardPos);
     const centre = boardPos && finite(boardPos.x, boardPos.y) && board ? { x: boardPos.x, y: boardPos.y } : { x: w / 2, y: (box.t + box.b) / 2 };
 
-    const room = form === 'landscape' && board ? Math.floor(w - board.r - 8 - sa.r - (size === 'phone-landscape' ? 10 : 16)) : null;
+    const room = board ? Math.floor(w - board.r - 8 - sa.r - (size === 'compact' ? 10 : 16)) : null;
     if (room !== barRoom) {
       barRoom = room;
       if (room == null) document.documentElement.style.removeProperty('--bar-room');
@@ -843,7 +752,7 @@ export function createHud(root, opts) {
 
     const items = [];
     for (const s of seatEls) {
-      if (!s || s.docked) continue;
+      if (!s) continue;
       const a = sp(s.seat, 'plate');
       if (!a || !finite(a.x, a.y)) {
         s.plate.style.visibility = 'hidden';
@@ -901,14 +810,7 @@ export function createHud(root, opts) {
     const overlays = [];
     if (barRect) overlays.push(barRect);
     if (resultsRect) overlays.push(resultsRect);
-    if (!status.hidden && form === 'landscape') overlays.push(offsetRect(status));
-    // Same rule as the CSS fallback (max of --actionbar-h and --dock-row), from the rect the bar reported.
-    const lift = barRect ? Math.max(Math.round(h - barRect.t), DOCK_ROW + sa.b) : null;
-    hero.style.bottom = lift == null ? '' : `${lift}px`;
-    if (!hero.hidden) {
-      const b = h - (lift ?? DOCK_ROW + sa.b);
-      overlays.push({ l: 0, t: b - DOCK_STRIP, r: w, b });
-    }
+    if (!status.hidden) overlays.push(offsetRect(status));
 
     const feltPos = sp(null, 'felt');
     const felt = Array.isArray(feltPos) ? feltPos.map(rectOf).filter(Boolean) : null;
@@ -937,7 +839,6 @@ export function createHud(root, opts) {
     document.documentElement.style.removeProperty('--bar-room');
     root.replaceChildren();
     root.classList.remove('hud');
-    delete root.dataset.form;
     delete root.dataset.size;
     seatEls.length = 0;
   }
@@ -947,5 +848,5 @@ export function createHud(root, opts) {
   /** Re-renders the last state, e.g. after the connection changed. */
   const refresh = () => lastDs && render(lastDs);
 
-  return { render, refresh, layout, metrics, setBar, destroy, get sizeClass() { return { form, size }; } };
+  return { render, refresh, layout, metrics, setBar, destroy, get sizeClass() { return { size }; } };
 }

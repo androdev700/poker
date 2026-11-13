@@ -1,12 +1,10 @@
 // World units: table felt on the y=0 plane, +z points at the camera, the local player sits at +z.
 
 export const SEATS = 6;
-export const MAX_RZ = 7;
 export const CARD = { w: 0.62, h: 0.87, t: 0.008, r: 0.055 };
 const DEG = Math.PI / 180;
 
 const LANDSCAPE = {
-  portrait: false,
   rx: 5.1,
   rz: 3.05,
   rail: 0.5,
@@ -35,72 +33,20 @@ const LANDSCAPE = {
   heroScale: 1.38,
 };
 
-const PORTRAIT = {
-  ...LANDSCAPE,
-  portrait: true,
-  rx: 2.7,
-  rz: 5.0,
-  rail: 0.42,
-  pitch: 56 * DEG,
-  fov: 40,
-  seatT: [90, 148, 212, 270, 328, 32].map((d) => d * DEG),
-  deckT: 302 * DEG,
-  holeInset: [0.72, 1.1, 1.1, 0.72, 1.1, 1.1],
-  // The lower side seats keep their bets and button out of the strip under the board where the pot label hangs.
-  betInset: [1.12, 1.85, 1.9, 1.6, 1.9, 1.85],
-  betSide: [1.3, -0.3, 0, 0, 0, 0.3],
-  // Side seats keep their button near the rail and off the pot row; seat 4's goes down, clear of the deck.
-  buttonInset: [1.05, 0.9, 0.75, 1.55, 0.7, 0.9],
-  buttonSide: [1.05, 0.75, -0.75, 0.8, -1.2, -0.75],
-  // Side nameplates cover the rail; upright ones (phones) also overlap the felt, since outside the rail they
-  // would squeeze the table to half the width.
-  plateOut: [0.47, 0, 0, 0.47, 0, 0],
-  uprightPlateOut: [0.47, -0.3, -0.3, 0.47, -0.3, -0.3],
-  plateSide: [0, 0, 0, 0, 0, 0],
-  potShift: 0,
-  deckInset: 0.95,
-  boardScale: 1.08,
-  holeScale: 0.88,
-  revealScale: 1.05,
-  heroScale: 1.45,
-};
-
 // Short, wide screens: side nameplates slide toward the table's ends so they sit beside the rail, not above it.
 const LANDSCAPE_ENDS = { ...LANDSCAPE, plateSide: [2.0, 1.2, -1.2, 0, 1.2, -1.2] };
 
-const portraits = new Map();
+// Short screens (the HUD's compact class): nameplates overlap the rail rather than stand outside it, so the felt
+// can be larger; the hero's moves in toward its cards to stay clear of the lower side plates.
+const LANDSCAPE_TIGHT = { ...LANDSCAPE, plateOut: [-0.25, -0.1, 0, -0.15, 0, -0.1], plateSide: [1.2, 0, 0, 0, 0, 0] };
 
-function portraitLayout(rz) {
-  let L = portraits.get(rz);
-  if (!L) {
-    L = { ...PORTRAIT, rz };
-    // On the shortest table seats 1 and 5 would put the button against the hero's bet; it goes up instead.
-    if (rz < 5) {
-      L.buttonInset = [1.05, 0.65, 0.75, 1.55, 0.7, 0.65];
-      L.buttonSide = [1.05, -1.15, -0.75, 0.8, -1.2, 1.15];
-    }
-    portraits.set(rz, L);
-  }
-  return L;
+export function makeLayout() {
+  return LANDSCAPE;
 }
 
-/**
- * Portrait vs landscape follows the canvas so HUD insets never flip the table; a portrait table stretches
- * to the free rectangle between the HUD bars. rz is quantised so small height changes (mobile URL bar)
- * keep the same layout object and do not trigger a rebuild.
- */
-export function makeLayout(aspect, freeAspect = aspect) {
-  if (aspect >= 1.05) return LANDSCAPE;
-  return portraitLayout(Math.min(MAX_RZ, Math.max(4.5, Math.round((4.0 / freeAspect) * 2) / 2)));
-}
-
-/** makeLayout's pick first, then the alternatives the stage may fall back to when nameplates do not fit. */
-export function layoutChoices(aspect, freeAspect = aspect) {
-  const first = makeLayout(aspect, freeAspect);
-  if (!first.portrait) return [first, LANDSCAPE_ENDS];
-  const out = [first];
-  for (let rz = first.rz + 0.5; rz <= MAX_RZ; rz += 0.5) out.push(portraitLayout(rz));
-  return out;
+/** makeLayout's pick first, then the alternatives the stage may pick when nameplates do not fit. */
+export function layoutChoices(compact = false) {
+  return compact ? [LANDSCAPE, LANDSCAPE_ENDS, LANDSCAPE_TIGHT] : [LANDSCAPE, LANDSCAPE_ENDS];
 }
 
 export const viewIndex = (seat, mySeat) => (((seat - mySeat) % SEATS) + SEATS) % SEATS;
@@ -123,10 +69,10 @@ export function railPoint(L, t, inset) {
 }
 
 /** Nameplate anchor; `out` is the distance outward from the felt edge (negative = over the felt). */
-export function plateSpot(L, v, upright = false) {
+export function plateSpot(L, v) {
   let t = L.seatT[v];
   if (L.plateSide[v]) t += L.plateSide[v] / Math.hypot(L.rx * Math.sin(t), L.rz * Math.cos(t));
-  const out = (upright && L.uprightPlateOut ? L.uprightPlateOut : L.plateOut)[v];
+  const out = L.plateOut[v];
   return { ...railPoint(L, t, -out), out };
 }
 
@@ -187,9 +133,8 @@ export function boardHalfDepth(L) {
 }
 
 export function potSpot(L, i = 0, n = 1) {
-  const z = -(boardHalfDepth(L) + (L.portrait ? 0.5 : 0.55));
-  const spacing = L.portrait ? 1.05 : 0.95;
-  return { x: (i - (n - 1) / 2) * spacing + L.potShift, z };
+  const z = -(boardHalfDepth(L) + 0.55);
+  return { x: (i - (n - 1) / 2) * 0.95 + L.potShift, z };
 }
 
 export function deckPose(L) {

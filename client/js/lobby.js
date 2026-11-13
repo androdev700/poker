@@ -67,15 +67,16 @@ async function copyText(input, text) {
 /**
  * @param {HTMLElement} root
  * @param {{onCreate:(a:{name:string, config:object})=>void, onJoin:(a:{code:string, name:string})=>void,
- *          onStart:()=>void, onCloseTable:()=>void, onLeave:()=>void}} handlers
+ *          onStart:()=>void, onCloseTable:()=>void, onLeave:()=>void, toastHost?:()=>HTMLElement}} handlers
  */
 export function createLobby(root, handlers) {
+  const toastHost = handlers.toastHost || (() => document.body);
   root.classList.add('screens');
   root.replaceChildren();
   const scrim = el('div', 'screens-scrim');
   const toast = el('div', 'toast glass');
   toast.setAttribute('role', 'alert');
-  root.append(scrim, toast);
+  root.append(scrim);
 
   let mode = null;
   let card = null;
@@ -331,7 +332,8 @@ export function createLobby(root, handlers) {
 
     const main = el('div', 'wait-col wait-main');
     const side = el('div', 'wait-col wait-side');
-    main.append(head, settings, playersSec, err, actions);
+    const rotateHint = el('p', 'rotate-hint', 'The table plays sideways — turn your phone when the game starts');
+    main.append(head, settings, playersSec, err, actions, rotateHint);
     side.append(shareSec);
     c.append(main, side);
     return { c, err, codeTiles, list, playersCount, shareList, settings, startBtn, startHint, waitMsg, closeBtn, leaveBtn, keys: {} };
@@ -504,6 +506,13 @@ export function createLobby(root, handlers) {
       return;
     }
     clearTimeout(toastTimer);
+    if (message) {
+      const host = toastHost();
+      if (toast.parentNode !== host) {
+        host.append(toast);
+        void toast.offsetWidth;
+      }
+    }
     toast.textContent = message || '';
     toast.classList.toggle('show', !!message);
     if (message) toastTimer = setTimeout(() => toast.classList.remove('show'), 4000);

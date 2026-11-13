@@ -24,6 +24,9 @@ room shows the room code and join links.
 
 - Everyone who joins gets the buy-in. The host starts the game. After each hand the board, the shown
   cards and the winner stay up until the host taps **Deal next hand**.
+- The table is always landscape. On a phone held upright it is drawn sideways, so turn the phone;
+  this works with rotation lock on. The lobby and waiting room stay upright. `?rotate=1` forces the
+  sideways table on a desktop for testing.
 - A player who loses all their chips is out and watches the rest of the session. There is no rebuy.
 - A turn that runs out of time checks if it can and folds otherwise. A disconnected player is
   auto-checked/folded until they come back; refreshing the page or waking a phone restores the seat.

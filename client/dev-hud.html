@@ -9,7 +9,7 @@
     { "imports": { "three": "/vendor/three/three.module.js" } }
   </script>
   <style>
-    .dev-felt { position: fixed; inset: 0; background: radial-gradient(120% 90% at 50% 45%, #13202c 0%, #090c13 75%); }
+    .dev-felt { position: absolute; inset: 0; background: radial-gradient(120% 90% at 50% 45%, #13202c 0%, #090c13 75%); }
     .dev-felt > * { position: absolute; }
     .dev-table {
       border-radius: 50%;
@@ -51,10 +51,12 @@
   </style>
 </head>
 <body>
-  <canvas id="stage"></canvas>
-  <div class="dev-felt" id="devFelt"></div>
-  <div id="hud"></div>
-  <div id="actionbar"></div>
+  <div id="table">
+    <canvas id="stage"></canvas>
+    <div class="dev-felt" id="devFelt"></div>
+    <div id="hud"></div>
+    <div id="actionbar"></div>
+  </div>
   <div id="screens"></div>
   <div class="dev-tools" id="devTools"></div>
   <div class="dev-log" id="devLog"></div>
@@ -62,11 +64,15 @@
     import { createHud } from '/js/hud.js';
     import { createActionBar } from '/js/actionbar.js';
     import { createLobby } from '/js/lobby.js';
+    import * as viewport from '/js/viewport.js';
 
     const params = new URLSearchParams(location.search);
     const SCENE = params.get('scene') === '1';
+    const URL_ROT = params.get('rotate') === '1' ? true : params.get('rotate') === '0' ? false : null;
     const log = (msg) => { document.getElementById('devLog').textContent = msg; console.log('[dev]', msg); };
     if (SCENE) document.body.classList.add('scene');
+    const table = document.getElementById('table');
+    viewport.init(table);
 
     // ---- fake geometry: an ellipse fitted so every plate (placed as hud.layout() places it) fits the free box ----
     let hud = null;
@@ -86,32 +92,20 @@
     }
 
     function geom() {
-      const W = document.documentElement.clientWidth;
-      const H = document.documentElement.clientHeight;
+      const { w: W, h: H } = viewport.size();
       const m = hud.metrics();
       const key = `${W}x${H}:${JSON.stringify(m)}`;
       if (key === geomKey) return G;
-      const portrait = W / H < 1.05;
       const free = { l: m.left, t: m.top, r: W - m.right, b: H - m.bottom };
-      const T = (portrait ? [90, 148, 212, 270, 328, 32] : [90, 150, 210, 270, 330, 30]).map((d) => (d * Math.PI) / 180);
+      const T = [90, 150, 210, 270, 330, 30].map((d) => (d * Math.PI) / 180);
       const dims = (v) => (v === 0 ? m.plates.hero : v === 3 ? m.plates.top : m.plates.side);
-      const g = { cx: (free.l + free.r) / 2, cy: (free.t + free.b) / 2, rx: (free.r - free.l) / 2, ry: (free.b - free.t) / 2, portrait, T, free };
-      const anchor = (v) => {
-        if (v === 0 && !portrait) {
-          const t = Math.PI / 2 + 0.32;
-          return ellipsePoint(g, t);
-        }
-        return ellipsePoint(g, T[v]);
-      };
+      const g = { cx: (free.l + free.r) / 2, cy: (free.t + free.b) / 2, rx: (free.r - free.l) / 2, ry: (free.b - free.t) / 2, T, free };
+      const anchor = (v) => ellipsePoint(g, v === 0 ? Math.PI / 2 + 0.32 : T[v]);
       for (let k = 0; k < 60; k++) {
         let L = Infinity, R = -Infinity, Tp = Infinity, B = -Infinity;
         for (let v = 0; v < 6; v++) {
           const d = dims(v);
           const a = anchor(v);
-          if (!d) {
-            B = Math.max(B, a.y + 8);
-            continue;
-          }
           const o = (d.w / 2) * Math.abs(a.ux) + (d.h / 2) * Math.abs(a.uy);
           const cx = a.x + a.ux * o;
           const cy = a.y + a.uy * o;
@@ -128,32 +122,29 @@
         g.ry = Math.max(40, g.ry - ((oT + oB) / 2) * 0.7);
         g.cy += ((oT - oB) / 2) * 0.7;
         // The real camera scales the table uniformly, so a short screen shrinks it rather than flattening it.
-        if (portrait) g.rx = Math.min(g.rx, g.ry / 1.35);
-        else {
-          g.rx = Math.min(g.rx, g.ry / 0.48);
-          g.ry = Math.min(g.ry, g.rx * 0.62);
-        }
+        g.rx = Math.min(g.rx, g.ry / 0.48);
+        g.ry = Math.min(g.ry, g.rx * 0.62);
       }
       g.anchor = anchor;
       // World proportions from scene/layout.js: ux px per world unit across, uy down the (foreshortened) depth.
-      const RX = portrait ? 2.7 : 5.1;
-      const RZ = portrait ? 5.0 : 3.05;
+      const RX = 5.1;
+      const RZ = 3.05;
       g.RX = RX;
       g.RZ = RZ;
       g.ux = g.rx / RX;
       g.uy = g.ry / RZ;
-      g.holeInset = portrait ? [0.72, 1.1, 1.1, 0.72, 1.1, 1.1] : [0.78, 0.78, 0.78, 0.78, 0.78, 0.78];
-      g.betInset = portrait ? [1.12, 1.9, 1.9, 1.6, 1.9, 1.9] : [1.12, 1.75, 1.55, 1.25, 1.55, 1.75];
-      const bs = portrait ? 1.08 : 1.22;
+      g.holeInset = [0.78, 0.78, 0.78, 0.78, 0.78, 0.78];
+      g.betInset = [1.12, 1.75, 1.55, 1.25, 1.55, 1.75];
+      const bs = 1.22;
       g.cw = 0.62 * bs * g.ux;
       g.ch = 0.87 * bs * g.uy;
       g.gap = 0.09 * bs * g.ux;
       const bw = g.cw * 5 + g.gap * 4;
       g.board = { l: g.cx - bw / 2, t: g.cy - g.ch / 2, r: g.cx + bw / 2, b: g.cy + g.ch / 2 };
       g.pileR = 0.3 * g.ux;
-      g.pileY = g.board.t - (portrait ? 0.5 : 0.55) * g.uy;
-      g.pileSpacing = (portrait ? 1.05 : 0.95) * g.ux;
-      const hs = portrait ? 1.45 : 1.38;
+      g.pileY = g.board.t - 0.55 * g.uy;
+      g.pileSpacing = 0.95 * g.ux;
+      const hs = 1.38;
       const hz = RZ - (0.72 + 0.32);
       const hw = 0.62 * hs * 1.56 * g.ux;
       const hh = 0.87 * hs * 1.5 * g.uy;
@@ -186,7 +177,7 @@
       if (v === 0) return { ...g.hero };
       const { x, y } = inward(g, v, g.holeInset[v]);
       const p = ds?.hand?.players?.[seat];
-      const k = (p?.cards ? (g.portrait ? 1.05 : 1.12) : g.portrait ? 0.88 : 0.92) / (g.portrait ? 1.08 : 1.22);
+      const k = (p?.cards ? 1.12 : 0.92) / 1.22;
       const w = g.cw * k * (p?.cards ? 1.56 : 1.34);
       const h = g.ch * k;
       return { l: x - w / 2, t: y - h / 2, r: x + w / 2, b: y + h / 2 };
@@ -196,7 +187,7 @@
       const g = geom();
       const v = viewOf(seat);
       let { x, y } = inward(g, v, g.betInset[v]);
-      if (v === 0) x += (g.portrait ? 1.3 : 1.6) * g.ux;
+      if (v === 0) x += 1.6 * g.ux;
       const r = g.pileR * 0.8;
       return { l: x - r, t: y - r, r: x + r, b: y + r };
     }
@@ -212,10 +203,6 @@
       if (spot === 'hero') return { ...g.hero };
       if (spot === 'pot') {
         const n = Math.max(1, opts?.pots || 1);
-        if (g.portrait) {
-          const side = hud.metrics().plates.side.w;
-          return { x: g.cx, y: g.board.b + 8, align: 'below-board', maxW: g.free.r - g.free.l - 2 * side - 12 };
-        }
         const piles = potPiles(n);
         const x = piles[0].l - 8;
         const hole = holeRect((youSeat + 2) % 6);
@@ -570,15 +557,16 @@
       document.getElementById('devFelt').replaceChildren();
       document.getElementById('devLog').textContent = '';
       STATES[name]();
-      const keep = ['clean', 'still', 'scene'].filter((k) => params.has(k)).map((k) => `&${k}=${params.get(k) || 1}`).join('');
+      const keep = ['clean', 'still', 'scene', 'rotate'].filter((k) => params.has(k)).map((k) => `&${k}=${params.get(k) || 1}`).join('');
       history.replaceState(null, '', `?state=${name}${keep}`);
     }
 
     // ---- overlap check (hud-design.md) ----
+    // Every rect is in logical table px (viewport.rect), so the checks hold under rotation and letterboxing.
     function hudCheck({ margin = 4, state = new URLSearchParams(location.search).get('state') } = {}) {
-      const vw = document.documentElement.clientWidth, vh = document.documentElement.clientHeight;
+      const { w: vw, h: vh } = viewport.size();
       const SEL = {
-        plate: '.plate', hero: '.hero-strip', pot: '.hud-pot', results: '.results',
+        plate: '.plate', pot: '.hud-pot', results: '.results',
         info: '.hud-info', tools: '.hud-tools', bar: '.actionbar:not(.is-hidden)', status: '.dock-status',
       };
       const shown = (el) => {
@@ -592,15 +580,15 @@
       for (const [kind, sel] of Object.entries(SEL)) {
         document.querySelectorAll(sel).forEach((el, i) => {
           if (!shown(el)) return;
-          const r = el.getBoundingClientRect();
-          if (r.width < 1 || r.height < 1) return;
-          items.push({ kind, id: `${kind}#${i} ${(el.textContent || '').trim().slice(0, 24)}`, el, l: r.left, t: r.top, r: r.right, b: r.bottom });
+          const r = viewport.rect(el);
+          if (r.r - r.l < 1 || r.b - r.t < 1) return;
+          items.push({ kind, id: `${kind}#${i} ${(el.textContent || '').trim().slice(0, 24)}`, el, l: r.l, t: r.t, r: r.r, b: r.b });
         });
       }
       const st = window.dev?.stage;
       const three = (st?.screenRects?.() || []).map((q) => ({ ...q, id: `3d:${q.kind}${q.seat ?? ''}` }));
       const hit = (a, b) => Math.min(a.r, b.r) - Math.max(a.l, b.l) > 0.5 && Math.min(a.b, b.b) - Math.max(a.t, b.t) > 0.5;
-      const OVERLAY = new Set(['results', 'bar', 'hero', 'status']);
+      const OVERLAY = new Set(['results', 'bar', 'status']);
       const fails = [];
       for (const a of items) {
         if (a.l < margin - 0.5 || a.t < margin - 0.5 || a.r > vw - margin + 0.5 || a.b > vh - margin + 0.5) {
@@ -608,8 +596,8 @@
             fails.push({ type: 'offscreen', a: a.id, rect: [a.l, a.t, a.r, a.b].map(Math.round).join(',') });
         }
         if (a.kind === 'plate') a.el.querySelectorAll('*').forEach((c) => {
-          const r = c.getBoundingClientRect();
-          if (r.width && (r.left < a.l - 1 || r.right > a.r + 1 || r.top < a.t - 1 || r.bottom > a.b + 1)) fails.push({ type: 'spills', a: a.id, b: String(c.className?.baseVal ?? c.className) });
+          const r = viewport.rect(c);
+          if (r.r - r.l > 0 && (r.l < a.l - 1 || r.r > a.r + 1 || r.t < a.t - 1 || r.b > a.b + 1)) fails.push({ type: 'spills', a: a.id, b: String(c.className?.baseVal ?? c.className) });
         });
       }
       for (let i = 0; i < items.length; i++) for (let j = i + 1; j < items.length; j++) {
@@ -617,10 +605,15 @@
         if (a.el.contains(b.el) || b.el.contains(a.el)) continue;
         if (hit(a, b)) fails.push({ type: 'overlap', a: a.id, b: b.id });
       }
+      // While it is the hero's turn, overlays must leave the hero's own plate and hole cards visible too.
+      const heroTurn = state === 'turn' || state === 'raise-open';
+      const me = window.dev?.ds?.you?.seat;
       for (const a of items) for (const q of three) {
-        if (OVERLAY.has(a.kind) && q.kind !== 'board') continue; // overlays may cover the felt, never the board
-        if (hit(a, q)) fails.push({ type: 'covers-3d', a: a.id, b: q.id });
+        const heroCards = heroTurn && q.kind === 'hole' && q.seat === me;
+        if (OVERLAY.has(a.kind) && q.kind !== 'board' && !heroCards) continue; // overlays may cover the felt, never the board
+        if (hit(a, q)) fails.push({ type: heroCards ? 'covers-hero' : 'covers-3d', a: a.id, b: q.id });
       }
+      if (heroTurn && me != null && !items.some((i) => i.kind === 'plate' && i.el.dataset.seat === String(me))) fails.push({ type: 'hero-plate-hidden', a: `plate#${me}` });
       // Hiding is not overlap resolution: the pot is never hidden while it holds chips, and a plate only where it
       // really sits beneath the results sheet or the open raise panel.
       const coveredPots = [...document.querySelectorAll('.hud-pot.is-covered')].filter((el) => !el.hidden);
@@ -628,8 +621,7 @@
       if (coveredPots.length && (window.dev?.ds?.hand?.potTotal ?? 0) > 0) fails.push({ type: 'covered-pot', a: 'pot' });
       const sheets = items.filter((i) => i.kind === 'results' || (i.kind === 'bar' && state === 'raise-open'));
       for (const el of coveredPlates) {
-        const r = el.getBoundingClientRect();
-        if (!sheets.some((s) => hit(s, { l: r.left, t: r.top, r: r.right, b: r.bottom }))) fails.push({ type: 'covered-plate', a: `plate#${el.dataset.seat}` });
+        if (!sheets.some((s) => hit(s, viewport.rect(el)))) fails.push({ type: 'covered-plate', a: `plate#${el.dataset.seat}` });
       }
       return { ok: fails.length === 0, viewport: `${vw}x${vh}`, checked: items.length, three: three.length, covered: { pot: coveredPots.length, plates: coveredPlates.length }, fails };
     }
@@ -652,6 +644,131 @@
         out[s] = hudCheck({ state: s });
       }
       return out;
+    }
+
+    function relayout() {
+      if (!hud) return;
+      stage?.setInsets?.(hud.metrics());
+      reportBar();
+      hud.layout();
+      drawFelt();
+    }
+
+    let rotForce = URL_ROT;
+    const SIZED = ['left', 'top', 'right', 'bottom', 'margin', 'width', 'height', 'max-width', 'max-height', '--sa-t', '--sa-r', '--sa-b', '--sa-l'];
+    /** Sizes #table to a logical w×h (on screen h×w when rotated) and fakes safe-area insets; `null` restores. */
+    async function setViewport(w, h, { rotated = false, sa } = {}) {
+      for (const p of SIZED) table.style.removeProperty(p);
+      if (w == null) rotForce = URL_ROT;
+      else {
+        rotForce = !!rotated;
+        const [bw, bh] = rotated ? [h, w] : [w, h];
+        const css = {
+          left: `${Math.max(0, Math.round((innerWidth - bw) / 2))}px`,
+          top: `${Math.max(0, Math.round((innerHeight - bh) / 2))}px`,
+          right: 'auto', bottom: 'auto', margin: '0',
+          width: `${w}px`, height: `${h}px`, 'max-width': 'none', 'max-height': 'none',
+        };
+        for (const [k, v] of Object.entries(css)) table.style.setProperty(k, v);
+        if (sa) for (const k of ['t', 'r', 'b', 'l']) table.style.setProperty(`--sa-${k}`, `${sa[k] || 0}px`);
+      }
+      viewport.force(rotForce);
+      relayout();
+      await settle();
+      return viewport.size();
+    }
+
+    const SWEEP_SIZES = [
+      ...[[635, 375], [659, 393], [664, 390], [720, 414], [739, 430], [852, 393, { t: 0, r: 0, b: 21, l: 59 }]]
+        .flatMap(([w, h, sa]) => [false, true].map((rotated) => ({ w, h, rotated, sa }))),
+      { w: 548, h: 375, rotated: true, only: 'offscreen' },
+      ...[[667, 375], [734, 337], [812, 375], [844, 340], [932, 430]].map(([w, h]) => ({ w, h })),
+      { w: 1024, h: 768 }, { w: 1024, h: 768, rotated: true }, { w: 1180, h: 820 },
+      { w: 1280, h: 720 }, { w: 1440, h: 900 }, { w: 1920, h: 1080 }, { w: 600, h: 480 },
+    ];
+    const sizeLabel = (z) => `${z.w}x${z.h}${z.rotated ? ' rotated' : ''}${z.sa ? ' sa' : ''}`;
+
+    async function hudSweepAll(states = dev.states, sizes = SWEEP_SIZES) {
+      const back = new URLSearchParams(location.search).get('state');
+      const failures = [];
+      let checked = 0;
+      try {
+        for (const z of sizes) {
+          await setViewport(z.w, z.h, z);
+          for (const s of states) {
+            go(s);
+            await settle();
+            const { fails } = hudCheck({ state: s });
+            const issues = z.only ? fails.filter((f) => f.type === z.only) : fails;
+            checked++;
+            if (issues.length) failures.push({ size: sizeLabel(z), state: s, issues });
+          }
+        }
+      } finally {
+        await setViewport(null);
+        if (STATES[back]) go(back);
+      }
+      return { ok: failures.length === 0, failures, checked };
+    }
+
+    /** Layout rect from the offset chain up to #table: untransformed, so it is the logical rect by construction. */
+    function chainRect(el) {
+      let x = 0;
+      let y = 0;
+      for (let n = el; n !== table; ) {
+        if (!n) return null;
+        x += n.offsetLeft;
+        y += n.offsetTop;
+        n = n.offsetParent;
+        if (n && n !== table) {
+          x += n.clientLeft;
+          y += n.clientTop;
+        }
+      }
+      return { l: x, t: y, r: x + el.offsetWidth, b: y + el.offsetHeight };
+    }
+
+    async function rotCheck() {
+      const was = viewport.isRotated();
+      if (!was) {
+        viewport.force(true);
+        relayout();
+      }
+      await settle();
+      const issues = [];
+      tools.style.pointerEvents = 'none';
+      try {
+        const shown = (el) => el.offsetWidth > 0 && el.offsetHeight > 0 && getComputedStyle(el).visibility !== 'hidden';
+        const targets = [...document.querySelectorAll('.hud-info, .hud-tools, .actionbar:not(.is-hidden), .results, .actionbar:not(.is-hidden) button')].filter(shown);
+        const fmt = (r) => [r.l, r.t, r.r, r.b].map(Math.round).join(',');
+        for (const el of targets) {
+          const name = `${el.tagName.toLowerCase()}.${[...el.classList].join('.')}`;
+          const v = viewport.rect(el);
+          const o = chainRect(el);
+          if (!o) {
+            issues.push({ type: 'outside-table', a: name });
+            continue;
+          }
+          if (['l', 't', 'r', 'b'].some((k) => Math.abs(v[k] - o[k]) > 1)) issues.push({ type: 'rect', a: name, rect: fmt(v), offset: fmt(o) });
+          const c = viewport.toClient((v.l + v.r) / 2, (v.t + v.b) / 2);
+          const [x, y] = Array.isArray(c) ? c : [c.x, c.y];
+          if (!(x >= 0 && y >= 0 && x < innerWidth && y < innerHeight)) continue;
+          // HUD text boxes inherit pointer-events:none from #hud, which would make hit-testing see through them.
+          const pe = el.style.pointerEvents;
+          el.style.pointerEvents = 'auto';
+          const got = document.elementFromPoint(x, y);
+          el.style.pointerEvents = pe;
+          if (!got || !el.contains(got)) issues.push({ type: 'hit', a: name, at: [x, y].map(Math.round).join(','), got: got ? `${got.tagName.toLowerCase()}.${[...got.classList].join('.')}` : null });
+        }
+      } finally {
+        tools.style.pointerEvents = '';
+        if (!was) {
+          viewport.force(rotForce);
+          relayout();
+          await settle();
+        }
+      }
+      return { ok: issues.length === 0, issues };
     }
 
     const tools = document.getElementById('devTools');
@@ -687,13 +804,8 @@
       }
     }
 
-    addEventListener('resize', () => {
-      if (!hud) return;
-      stage?.setInsets?.(hud.metrics());
-      reportBar();
-      hud.layout();
-      drawFelt();
-    });
+    addEventListener('resize', relayout);
+    viewport.onChange(relayout);
     window.dev = {
       go,
       get ds() { return ds; },
@@ -704,11 +816,15 @@
         connected = !!v;
         hud?.refresh();
       },
+      setViewport,
+      sweepSizes: SWEEP_SIZES,
       bar,
       lobby,
     };
     window.hudCheck = hudCheck;
     window.hudSweep = hudSweep;
+    window.hudSweepAll = hudSweepAll;
+    window.rotCheck = rotCheck;
     go(STATES[params.get('state')] ? params.get('state') : 'turn');
     loop();
   </script>

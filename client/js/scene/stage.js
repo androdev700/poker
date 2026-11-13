@@ -27,6 +27,10 @@ const FIT_MARGIN = 6;
 const POT_GAP = 8;
 const POT_PILL_H = 28;
 const POT_MIN_W = 120;
+// hud.js GAP and PUSH_GAP: how far above the action bar the HUD lifts a plate it covers, and how far that plate
+// keeps off the felt's card, bet and button spots.
+const LIFT_GAP = 6;
+const SPOT_GAP = 4;
 // The largest pile chips.js builds: two rows of three stacks, ten chips high.
 const PILE_HW = 2 * CHIP_R + 0.018 + CHIP_R + 0.01;
 const PILE_HD = (2 * CHIP_R + 0.018) / 2 + CHIP_R + 0.01;
@@ -146,7 +150,6 @@ export function createStage(canvas) {
   const eul = new THREE.Euler(0, 0, 0, 'YXZ');
   let insets = null;
   let insetKey = '';
-  let pendingRebuild = false;
 
   const v = (seat) => viewIndex(seat, st.mySeat);
   const isHero = (seat) => seat === st.heroSeat && v(seat) === 0;
@@ -821,11 +824,13 @@ export function createStage(canvas) {
     return r;
   }
 
+  // The HUD's compact size class.
+  const compact = () => cssH <= 520;
+
   /** Without HUD metrics the nameplates are assumed to have the design's sizes for this canvas. */
   function defaultPlates() {
-    const phone = cssW / cssH < 1.05 ? cssW < 600 : cssH <= 520;
-    const wide = phone ? { w: 160, h: 56 } : { w: 172, h: 78 };
-    return cssW / cssH < 1.05 && phone ? { side: { w: 76, h: 100 }, top: wide } : { side: wide, top: wide };
+    const plate = compact() ? { w: 136, h: 52 } : { w: 172, h: 78 };
+    return { side: plate, top: plate };
   }
 
   function currentInsets() {
@@ -845,9 +850,8 @@ export function createStage(canvas) {
     return vi === 0 ? I.plates.hero : vi === 3 ? I.plates.top : I.plates.side;
   }
 
-  function plateAnchor(vi, I = currentInsets()) {
-    const size = plateSize(vi, I);
-    const p = plateSpot(L, vi, !!size && size.h > size.w);
+  function plateAnchor(vi) {
+    const p = plateSpot(L, vi);
     const y = p.out > 0 ? RAIL_Y : 0;
     const A = project(p.x, y, p.z);
     const B = project(p.x + p.tx * 0.05, y, p.z + p.tz * 0.05);
@@ -878,7 +882,7 @@ export function createStage(canvas) {
     const out = [];
     for (let vi = 0; vi < SEATS; vi++) {
       const size = plateSize(vi, I);
-      if (size) out.push(plateRect(plateAnchor(vi, I), size));
+      if (size) out.push(plateRect(plateAnchor(vi), size));
     }
     return out;
   }
@@ -923,22 +927,6 @@ export function createStage(canvas) {
     for (let i = 0; i < n; i++) {
       const s = potSpot(L, i, n);
       piles.push(boxRect(emptyRect(), s.x, s.z, PILE_HW, PILE_HD, 0, PILE_H));
-    }
-    if (L.portrait) {
-      const B = boardRect();
-      const x = (B.l + B.r) / 2;
-      const y = B.b + POT_GAP;
-      let lo = F.l;
-      let hi = F.r;
-      for (const o of [...obstacles, ...piles]) {
-        if (o.b <= y || o.t >= y + POT_PILL_H) continue;
-        if (o.r <= x) lo = Math.max(lo, o.r);
-        else if (o.l >= x) hi = Math.min(hi, o.l);
-        else lo = hi = x;
-      }
-      const room = 2 * (Math.min(x - lo, hi - x) - POT_GAP);
-      const beside = cssW - I.left - I.right - 2 * I.plates.side.w - 4 * FIT_MARGIN;
-      return { x, y, align: 'below-board', maxW: Math.max(0, Math.min(room, beside)) };
     }
     const lead = piles.reduce((a, b) => (b.l < a.l ? b : a));
     const x = lead.l - POT_GAP;
@@ -1071,53 +1059,54 @@ export function createStage(canvas) {
   function rebuild() {
     table.build(L);
     const reach = Math.max(L.rx, L.rz) + L.rail;
-    spot.position.set(0, 12, L.portrait ? 0 : 1.5);
+    spot.position.set(0, 12, 1.5);
     spot.angle = Math.atan2(reach + 1.0, 12);
     spot.target.position.set(0, 0, 0);
     tw.cancelAll();
     placeAll();
   }
 
-  /** 2 when nameplates stay apart, +1 when the pot label has a usable slot; ties go to the bigger board. */
+  /**
+   * 2 when nameplates stay apart and off every card, bet and button spot, +1 when the pot label has a usable
+   * slot; ties go to the bigger board. A plate in the action bar's dock counts where the HUD lifts it to, just
+   * above the bar.
+   */
   function rateFraming() {
-    const plates = plateRects(currentInsets());
-    let apart = true;
+    const I = currentInsets();
+    const dock = I.dock && { l: cssW - I.right - I.dock.w, t: cssH - I.bottom - I.dock.h, r: cssW, b: cssH };
+    const plates = plateRects(I).map((p) => {
+      if (!dock || !hits(p, dock)) return p;
+      const b = dock.t - LIFT_GAP;
+      return { l: p.l - SPOT_GAP, t: b - (p.b - p.t) - SPOT_GAP, r: p.r + SPOT_GAP, b: b + SPOT_GAP };
+    });
+    const spots = seatObstacles();
+    let apart = !plates.some((p) => spots.some((o) => hits(p, o)));
     for (let i = 0; i < plates.length && apart; i++)
       for (let j = i + 1; j < plates.length; j++) if (hits(plates[i], plates[j])) apart = false;
     const board = boardRect();
     return { score: (apart ? 2 : 0) + (potAnchor(3).maxW >= POT_MIN_W ? 1 : 0), board: board.r - board.l };
   }
 
-  /**
-   * makeLayout's pick unless its framing collides; then the next choice (a longer portrait table, or
-   * landscape side plates moved to the ends) that frames best.
-   */
+  /** makeLayout's pick unless its framing collides; then whichever choice frames best. */
   function chooseLayout() {
-    const F = freeRect();
-    const choices = layoutChoices(cssW / cssH, (F.r - F.l) / (F.b - F.t));
     const keep = L;
     let best = null;
-    for (const cand of choices) {
+    for (const cand of layoutChoices(compact())) {
       L = cand;
       fitCamera();
       const r = rateFraming();
       if (!best || r.score > best.score || (r.score === best.score && r.board > best.board + 0.5)) best = { ...r, cand };
-      if (best.score === 3 && cand.portrait) break;
     }
     L = keep;
     return best.cand;
   }
 
-  /** Inset changes wait for running animations before swapping the table shape; resizes do not. */
-  function refit(fromInsets) {
+  function refit() {
     const next = chooseLayout();
-    // Variants of one table shape differ only in where the HUD anchors its nameplates.
-    const reshape = !L || next.portrait !== L.portrait || next.rz !== L.rz;
-    pendingRebuild = reshape && fromInsets && !!L && tw.busy;
-    if (next !== L && !pendingRebuild) {
-      L = next;
-      if (reshape) rebuild();
-    }
+    // The choices share one table shape and differ only in where the HUD anchors its nameplates.
+    const first = !L;
+    L = next;
+    if (first) rebuild();
     fitCamera();
     dirty = true;
     for (const cb of layoutCbs) cb();
@@ -1132,12 +1121,17 @@ export function createStage(canvas) {
       left: px(o.left),
       right: px(o.right),
       plates: { side: size(o.plates?.side), top: size(o.plates?.top), hero: size(o.plates?.hero) },
+      dock: size(o.dock),
     };
     const key = JSON.stringify(next);
-    if (key === insetKey) return false;
+    // The ResizeObserver reports a resize only after this frame's callbacks, which would frame the HUD against
+    // the old canvas size meanwhile.
+    const resized = !!cssW && (canvas.clientWidth !== cssW || canvas.clientHeight !== cssH);
+    if (key === insetKey && !resized) return false;
     insetKey = key;
     insets = next;
-    if (cssW) refit(true);
+    if (resized) layout();
+    else if (cssW) refit();
     return true;
   }
 
@@ -1157,10 +1151,15 @@ export function createStage(canvas) {
         spot.shadow.map = null;
       }
     }
-    refit(false);
+    refit();
+    // Resizing clears the canvas; draw now so a size flip (rotation) never paints a blank frame.
+    renderer.render(scene, camera);
+    dirty = false;
   }
 
-  const ro = new ResizeObserver(() => layout());
+  const ro = new ResizeObserver(() => {
+    if (canvas.clientWidth !== cssW || canvas.clientHeight !== cssH) layout();
+  });
   ro.observe(canvas);
   layout();
 
@@ -1178,7 +1177,6 @@ export function createStage(canvas) {
     last = now;
     const busy = tw.busy;
     if (busy) tw.update(dt);
-    if (pendingRebuild && !tw.busy) refit(false);
     if ((busy || dirty) && L) {
       renderer.render(scene, camera);
       dirty = false;
